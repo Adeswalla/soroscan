@@ -1041,3 +1041,37 @@ class Notification(models.Model):
 
     def __str__(self):
         return f"[{self.notification_type}] {self.title} → {self.user}"
+
+
+# ---------------------------------------------------------------------------
+# Analytics: pre-computed event aggregations
+# ---------------------------------------------------------------------------
+
+class EventAggregation(models.Model):
+    """
+    Pre-computed hourly event counts per contract and event type.
+    Populated by the ``aggregate_event_statistics`` Celery task.
+    """
+
+    contract = models.ForeignKey(
+        TrackedContract,
+        on_delete=models.CASCADE,
+        related_name="aggregations",
+    )
+    event_type = models.CharField(max_length=128)
+    timestamp = models.DateTimeField(
+        help_text="Rounded to the nearest hour (bucket start)",
+        db_index=True,
+    )
+    event_count = models.IntegerField(default=0)
+
+    class Meta:
+        unique_together = ("contract", "event_type", "timestamp")
+        indexes = [
+            models.Index(fields=["contract", "timestamp"]),
+            models.Index(fields=["timestamp"]),
+        ]
+        ordering = ["-timestamp"]
+
+    def __str__(self):
+        return f"Agg({self.contract.name}, {self.event_type}, {self.timestamp}, {self.event_count})"

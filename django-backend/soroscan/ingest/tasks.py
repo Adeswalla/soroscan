@@ -24,6 +24,7 @@ from django.conf import settings
 from django.db.models import F
 from django.utils import timezone
 
+from django.db import models
 from .models import ContractABI, ContractEvent, ContractSigningKey, TrackedContract, WebhookSubscription, IndexerState, EventSchema, RemediationRule, RemediationIncident, AdminAction
 from .stellar_client import SorobanClient
 
@@ -1693,3 +1694,96 @@ def cleanup_silk_data() -> int:
         extra={},
     )
     return deleted_count
+
+
+# ---------------------------------------------------------------------------
+# Analytics: aggregate_event_statistics periodic task
+# ---------------------------------------------------------------------------
+
+@shared_task
+def aggregate_event_statistics() -> dict[str, Any]:
+    """
+    Aggregate event counts for the last completed hour into EventAggregation.
+
+    Runs hourly via Celery Beat. Pre-computes per-contract, per-event-type
+    counts so analytics queries stay under 500 ms even for a 1-year range.
+
+    Also detects anomalies: if the current hour's total event count drops
+    by more than ANOMALY_DROP_THRESHOLD (default 50%) compared to the
+    previous hour, an ops alert is sent.
+    """
+    import os
+    from django.db.models import Count as _Count
+    from .models import EventAggregation
+
+    _start = time.monotonic()
+    now = timezone.now()
+    # Current completed hour bucket
+    hour_bucket = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+    hour_end = hour_bucket + timedelta(hours=1)
+
+    aggs = (
+        ContractEvent.objects.filter(
+            timestamp__gte=hour_bucket,
+            timestamp__lt=hour_end,
+        )
+        .values("contract", "event_type")
+        .annotate(count=_Count("id"))
+    )
+
+    upserted = 0
+    current_total = 0
+    for agg in aggs:
+        EventAggregation.objects.update_or_create(
+            contract_id=agg["contract"],
+            event_type=agg["event_type"],
+            timestamp=hour_bucket,
+            defaults={"event_count": agg["count"]},
+        )
+        upserted += 1
+        current_total += agg["count"]
+
+    # Anomaly detection: compare with previous hour
+    prev_bucket = hour_bucket - timedelta(hours=1)
+    prev_total = (
+        EventAggregation.objects.filter(timestamp=prev_bucket)
+        .aggregate(total=models.Sum("event_count"))["total"]
+        or 0
+    )
+
+    threshold = float(os.environ.get("ANOMALY_DROP_THRESHOLD", "0.5"))
+    anomaly_detected = False
+    if prev_total > 0 and current_total < prev_total * (1 - threshold):
+        anomaly_detected = True
+        message = (
+            f"[SoroScan] Event volume anomaly detected: "
+            f"current hour={current_total}, previous hour={prev_total} "
+            f"(drop > {int(threshold * 100)}%). Possible RPC failure."
+        )
+        logger.warning(message, extra={})
+        # Fire ops alert if configured
+        ops_target = os.environ.get("ANOMALY_ALERT_TARGET", "")
+        ops_type = os.environ.get("ANOMALY_ALERT_TYPE", "slack")
+        if ops_target:
+            try:
+                _send_ops_alert(ops_type, ops_target, message, {
+                    "current_hour": current_total,
+                    "previous_hour": prev_total,
+                    "bucket": hour_bucket.isoformat(),
+                })
+            except Exception:
+                logger.exception("Failed to send anomaly alert", extra={})
+
+    elapsed = time.monotonic() - _start
+    logger.info(
+        "aggregate_event_statistics: upserted=%d current_total=%d prev_total=%d anomaly=%s elapsed=%.3fs",
+        upserted, current_total, prev_total, anomaly_detected, elapsed,
+        extra={},
+    )
+    return {
+        "upserted": upserted,
+        "current_total": current_total,
+        "prev_total": prev_total,
+        "anomaly_detected": anomaly_detected,
+        "bucket": hour_bucket.isoformat(),
+    }

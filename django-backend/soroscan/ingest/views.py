@@ -1,8 +1,10 @@
 """
 API Views for SoroScan event ingestion.
 """
+import csv
 import hashlib
 import hmac
+import io
 import json
 import logging
 
@@ -10,6 +12,7 @@ from django.conf import settings
 from django.db.models import Count, Max, Q
 from django.db.models.functions import Cast
 from django.shortcuts import get_object_or_404, redirect
+from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, inline_serializer
@@ -30,6 +33,7 @@ from .models import (
     AdminAction,
     ContractEvent,
     ContractInvocation,
+    EventAggregation,
     Team,
     TeamMembership,
     TrackedContract,
@@ -37,6 +41,7 @@ from .models import (
     ArchivedEventBatch,
 )
 from .serializers import (
+    AnalyticsSerializer,
     APIKeySerializer,
     ContractEventSerializer,
     ContractInvocationSerializer,
@@ -838,3 +843,165 @@ def audit_trail_view(request):
 
     serializer = AdminActionSerializer(qs[:limit], many=True)
     return Response(serializer.data)
+
+
+# ---------------------------------------------------------------------------
+# Analytics API
+# ---------------------------------------------------------------------------
+
+_GRANULARITY_TRUNC = {
+    "hourly": "hour",
+    "daily": "day",
+    "weekly": "week",
+    "monthly": "month",
+}
+
+_RANGE_DAYS = {
+    "1d": 1,
+    "7d": 7,
+    "30d": 30,
+    "90d": 90,
+    "365d": 365,
+}
+
+
+@extend_schema(
+    parameters=[
+        inline_serializer(
+            name="AnalyticsParams",
+            fields={
+                "metric": serializers.ChoiceField(
+                    choices=["event_volume", "active_contracts", "event_types"],
+                    required=False,
+                ),
+                "granularity": serializers.ChoiceField(
+                    choices=["hourly", "daily", "weekly", "monthly"],
+                    required=False,
+                ),
+                "range": serializers.CharField(required=False, help_text="e.g. 7d, 30d, 365d"),
+                "contract_id": serializers.CharField(required=False),
+                "format": serializers.ChoiceField(choices=["json", "csv"], required=False),
+            },
+        )
+    ],
+    responses=AnalyticsSerializer,
+)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def analytics_view(request):
+    """
+    Analytics endpoint for pre-computed event aggregations.
+
+    GET /api/analytics/?metric=event_volume&granularity=daily&range=30d
+
+    Metrics:
+    - event_volume   — time-series event counts (uses EventAggregation)
+    - active_contracts — count of contracts with events in range
+    - event_types    — breakdown of event type totals in range
+
+    Granularity: hourly | daily | weekly | monthly
+    Range: 1d | 7d | 30d | 90d | 365d  (max 365d)
+    Format: json (default) | csv
+    """
+    from django.db.models import Sum
+    from django.db.models.functions import TruncHour, TruncDay, TruncWeek, TruncMonth
+
+    metric = request.query_params.get("metric", "event_volume")
+    granularity = request.query_params.get("granularity", "daily")
+    range_param = request.query_params.get("range", "30d")
+    contract_id = request.query_params.get("contract_id")
+    fmt = request.query_params.get("format", "json")
+
+    if granularity not in _GRANULARITY_TRUNC:
+        return Response(
+            {"detail": f"Invalid granularity. Choose from: {list(_GRANULARITY_TRUNC)}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    days = _RANGE_DAYS.get(range_param)
+    if days is None:
+        # Accept raw integer days, capped at 365
+        try:
+            days = min(int(range_param.rstrip("d")), 365)
+        except (ValueError, AttributeError):
+            return Response(
+                {"detail": "Invalid range. Use e.g. 7d, 30d, 365d (max 365d)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    since = timezone.now() - timezone.timedelta(days=days)
+
+    qs = EventAggregation.objects.filter(timestamp__gte=since)
+    if contract_id:
+        qs = qs.filter(contract__contract_id=contract_id)
+
+    trunc_map = {
+        "hourly": TruncHour,
+        "daily": TruncDay,
+        "weekly": TruncWeek,
+        "monthly": TruncMonth,
+    }
+    TruncFn = trunc_map[granularity]
+
+    if metric == "event_volume":
+        rows = (
+            qs.annotate(bucket=TruncFn("timestamp"))
+            .values("bucket", "contract__contract_id")
+            .annotate(count=Sum("event_count"))
+            .order_by("bucket")
+        )
+        data = [
+            {
+                "timestamp": r["bucket"].isoformat(),
+                "contract_id": r["contract__contract_id"],
+                "count": r["count"],
+            }
+            for r in rows
+        ]
+
+    elif metric == "active_contracts":
+        from django.db.models import Count as _Count
+        rows = (
+            qs.annotate(bucket=TruncFn("timestamp"))
+            .values("bucket")
+            .annotate(active_contracts=_Count("contract", distinct=True))
+            .order_by("bucket")
+        )
+        data = [
+            {
+                "timestamp": r["bucket"].isoformat(),
+                "active_contracts": r["active_contracts"],
+            }
+            for r in rows
+        ]
+
+    elif metric == "event_types":
+        rows = (
+            qs.values("event_type")
+            .annotate(count=Sum("event_count"))
+            .order_by("-count")
+        )
+        data = [{"event_type": r["event_type"], "count": r["count"]} for r in rows]
+
+    else:
+        return Response(
+            {"detail": "Invalid metric. Choose from: event_volume, active_contracts, event_types."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if fmt == "csv":
+        output = io.StringIO()
+        if data:
+            writer = csv.DictWriter(output, fieldnames=list(data[0].keys()))
+            writer.writeheader()
+            writer.writerows(data)
+        response = HttpResponse(output.getvalue(), content_type="text/csv")
+        response["Content-Disposition"] = f'attachment; filename="analytics_{metric}_{granularity}_{range_param}.csv"'
+        return response
+
+    return Response({
+        "metric": metric,
+        "granularity": granularity,
+        "range": range_param,
+        "data": data,
+    })

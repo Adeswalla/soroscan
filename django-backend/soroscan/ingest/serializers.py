@@ -274,3 +274,12 @@ class EventSearchSerializer(serializers.ModelSerializer):
     def get_relevance_score(self, obj) -> float:
         # Placeholder — set to 1.0 until full-text ranking is implemented.
         return 1.0
+
+
+class AnalyticsSerializer(serializers.Serializer):
+    """Serializer for analytics API responses."""
+
+    metric = serializers.CharField()
+    granularity = serializers.CharField()
+    range = serializers.CharField()
+    data = serializers.ListField(child=serializers.DictField())

@@ -22,6 +22,7 @@ from .models import (
     ContractSigningKey,
     ContractQuota,
     DataRetentionPolicy,
+    EventAggregation,
     EventSchema,
     IndexerState,
     RemediationIncident,
@@ -822,3 +823,157 @@ class AdminActionAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         return False
 
+
+# ---------------------------------------------------------------------------
+# Analytics admin: EventAggregation + custom dashboard
+# ---------------------------------------------------------------------------
+
+from django.db.models import Sum
+
+
+@admin.register(EventAggregation)
+class EventAggregationAdmin(admin.ModelAdmin):
+    """Read-only view of pre-computed event aggregations."""
+
+    list_display = ["contract", "event_type", "timestamp", "event_count"]
+    list_filter = ["event_type", "timestamp"]
+    search_fields = ["contract__name", "contract__contract_id", "event_type"]
+    readonly_fields = ["contract", "event_type", "timestamp", "event_count"]
+    ordering = ["-timestamp"]
+    date_hierarchy = "timestamp"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_urls(self):
+        extra = [
+            path(
+                "dashboard/",
+                self.admin_site.admin_view(self._dashboard_view),
+                name="ingest_analytics_dashboard",
+            ),
+        ]
+        return extra + super().get_urls()
+
+    def _dashboard_view(self, request):
+        """Analytics dashboard with summary widgets."""
+        from django.utils import timezone as tz
+        from datetime import timedelta
+
+        now = tz.now()
+        last_30d = now - timedelta(days=30)
+        last_7d = now - timedelta(days=7)
+
+        # Widget 1: total events (all time from aggregations)
+        total_events = EventAggregation.objects.aggregate(t=Sum("event_count"))["t"] or 0
+
+        # Widget 2: active contracts (with events in last 30d)
+        active_contracts = (
+            EventAggregation.objects.filter(timestamp__gte=last_30d)
+            .values("contract")
+            .distinct()
+            .count()
+        )
+
+        # Widget 3: event type breakdown (last 30d, top 10)
+        type_breakdown = (
+            EventAggregation.objects.filter(timestamp__gte=last_30d)
+            .values("event_type")
+            .annotate(total=Sum("event_count"))
+            .order_by("-total")[:10]
+        )
+
+        # Widget 4: daily event volume last 7d
+        from django.db.models.functions import TruncDay
+        daily_volume = (
+            EventAggregation.objects.filter(timestamp__gte=last_7d)
+            .annotate(day=TruncDay("timestamp"))
+            .values("day")
+            .annotate(total=Sum("event_count"))
+            .order_by("day")
+        )
+
+        # Build type breakdown rows
+        type_rows = "".join(
+            f"<tr><td>{r['event_type']}</td><td>{r['total']:,}</td></tr>"
+            for r in type_breakdown
+        ) or "<tr><td colspan='2'>No data</td></tr>"
+
+        # Build daily volume rows
+        daily_rows = "".join(
+            f"<tr><td>{r['day'].strftime('%Y-%m-%d')}</td><td>{r['total']:,}</td></tr>"
+            for r in daily_volume
+        ) or "<tr><td colspan='2'>No data</td></tr>"
+
+        html = f"""
+<html>
+<head>
+  <title>Analytics Dashboard</title>
+  <link rel="stylesheet" type="text/css" href="/static/admin/css/base.css">
+  <style>
+    .widget-row {{ display: flex; gap: 20px; margin-bottom: 24px; flex-wrap: wrap; }}
+    .widget {{
+      background: #fff; border: 1px solid #ddd; border-radius: 6px;
+      padding: 20px 28px; min-width: 180px; text-align: center;
+    }}
+    .widget .value {{ font-size: 2.2em; font-weight: bold; color: #417690; }}
+    .widget .label {{ color: #666; margin-top: 4px; font-size: 0.95em; }}
+    table {{ border-collapse: collapse; width: 100%; max-width: 600px; }}
+    th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
+    th {{ background: #f8f8f8; }}
+    h2 {{ margin-top: 28px; }}
+  </style>
+</head>
+<body id="django-admin">
+<div id="content-main" style="padding: 20px;">
+  <h1>Analytics Dashboard</h1>
+  <p style="color:#666">Pre-computed from hourly aggregations. Run <code>aggregate_event_statistics</code> to refresh.</p>
+
+  <div class="widget-row">
+    <div class="widget">
+      <div class="value">{total_events:,}</div>
+      <div class="label">Total Events (all time)</div>
+    </div>
+    <div class="widget">
+      <div class="value">{active_contracts:,}</div>
+      <div class="label">Active Contracts (30d)</div>
+    </div>
+    <div class="widget">
+      <div class="value">{len(list(type_breakdown))}</div>
+      <div class="label">Distinct Event Types (30d)</div>
+    </div>
+  </div>
+
+  <h2>Event Type Breakdown (last 30 days)</h2>
+  <table>
+    <thead><tr><th>Event Type</th><th>Count</th></tr></thead>
+    <tbody>{type_rows}</tbody>
+  </table>
+
+  <h2>Daily Event Volume (last 7 days)</h2>
+  <table>
+    <thead><tr><th>Date</th><th>Events</th></tr></thead>
+    <tbody>{daily_rows}</tbody>
+  </table>
+
+  <p style="margin-top:24px">
+    <a href="/api/analytics/?metric=event_volume&granularity=daily&range=30d&format=csv"
+       style="background:#417690;color:#fff;padding:8px 16px;border-radius:4px;text-decoration:none">
+      Export CSV (30d daily)
+    </a>
+    &nbsp;
+    <a href="/api/analytics/?metric=event_types&granularity=daily&range=30d&format=csv"
+       style="background:#417690;color:#fff;padding:8px 16px;border-radius:4px;text-decoration:none">
+      Export Event Types CSV
+    </a>
+  </p>
+</div>
+</body>
+</html>"""
+        return HttpResponse(html)
