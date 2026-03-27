@@ -990,6 +990,7 @@ class StateChangeInline(admin.TabularInline):
     readonly_fields = ["field_name", "old_value", "new_value", "created_at"]
     can_delete = False
     fields = ["field_name", "old_value", "new_value", "created_at"]
+    fk_name = "snapshot"  # Specify which FK to use for the inline
 
 
 @admin.register(ContractSnapshot)
