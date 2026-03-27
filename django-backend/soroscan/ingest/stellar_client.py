@@ -474,3 +474,49 @@ class SorobanClient:
                 error=str(e),
             )
 
+    def get_contract_state(self, contract_id: str) -> Optional[dict]:
+        """
+        Fetch the current state of a contract.
+
+        Queries the contract's state via RPC and returns it as a JSON-serializable dict.
+        Returns None on error.
+
+        Args:
+            contract_id: The contract address (C...)
+
+        Returns:
+            Contract state as dict or None on error
+        """
+        try:
+            self._rate_limiter.acquire()
+
+            # Use the Soroban RPC to get contract data
+            # This is a simplified implementation - actual state retrieval depends on
+            # how the contract exposes its state (via read-only functions or direct state access)
+            response = self.server.get_contract_data(contract_id)
+
+            if not response:
+                logger.warning("No state data returned for contract %s", contract_id)
+                return None
+
+            # Convert response to JSON-serializable dict
+            state_dict = {}
+            if hasattr(response, "entries"):
+                for entry in response.entries:
+                    key = getattr(entry, "key", None)
+                    val = getattr(entry, "val", None)
+                    if key and val:
+                        # Store as string representation for now
+                        # In production, you'd parse the XDR properly
+                        state_dict[str(key)] = str(val)
+
+            logger.info(
+                "Retrieved state for contract %s with %d entries",
+                contract_id,
+                len(state_dict),
+            )
+            return state_dict if state_dict else {"_empty": True}
+
+        except Exception as e:
+            logger.exception("Failed to get contract state for %s", contract_id)
+            return None

@@ -1787,3 +1787,171 @@ def aggregate_event_statistics() -> dict[str, Any]:
         "anomaly_detected": anomaly_detected,
         "bucket": hour_bucket.isoformat(),
     }
+
+
+
+# State Snapshots: periodic contract state capture
+# ---------------------------------------------------------------------------
+
+def _calculate_state_diff(old_state: dict, new_state: dict) -> list[dict]:
+    """
+    Calculate field-level differences between two state snapshots.
+
+    Returns a list of dicts with keys: field_name, old_value, new_value
+    """
+    changes = []
+
+    # Check for new or modified fields
+    for key, new_val in new_state.items():
+        if key not in old_state:
+            changes.append({
+                "field_name": key,
+                "old_value": None,
+                "new_value": new_val,
+            })
+        elif old_state[key] != new_val:
+            changes.append({
+                "field_name": key,
+                "old_value": old_state[key],
+                "new_value": new_val,
+            })
+
+    # Check for deleted fields
+    for key, old_val in old_state.items():
+        if key not in new_state:
+            changes.append({
+                "field_name": key,
+                "old_value": old_val,
+                "new_value": None,
+            })
+
+    return changes
+
+
+@shared_task
+def snapshot_contract_state(snapshot_interval: int = 1000) -> dict[str, Any]:
+    """
+    Capture periodic snapshots of active contract state.
+
+    Runs every N ledgers (configurable, default 1000). For each active contract,
+    if its last_indexed_ledger is a multiple of snapshot_interval, captures the
+    current state and tracks field-level changes.
+
+    Args:
+        snapshot_interval: Capture snapshot every N ledgers (default: 1000)
+
+    Returns:
+        Dict with snapshot_count, state_change_count, errors
+    """
+    from .models import ContractSnapshot, StateChange, TrackedContract
+    from .stellar_client import SorobanClient
+
+    _start = time.monotonic()
+    snapshot_count = 0
+    state_change_count = 0
+    errors = []
+
+    try:
+        client = SorobanClient()
+        active_contracts = TrackedContract.objects.filter(is_active=True)
+
+        for contract in active_contracts:
+            try:
+                # Only snapshot at configured intervals
+                if not contract.last_indexed_ledger:
+                    continue
+
+                if contract.last_indexed_ledger % snapshot_interval != 0:
+                    continue
+
+                # Fetch current state
+                state_data = client.get_contract_state(contract.contract_id)
+                if state_data is None:
+                    logger.warning(
+                        "Failed to fetch state for contract %s",
+                        contract.contract_id,
+                    )
+                    errors.append(f"Failed to fetch state for {contract.contract_id}")
+                    continue
+
+                # Check state size (max 1 MB)
+                import json
+                state_size = len(json.dumps(state_data).encode("utf-8"))
+                if state_size > 1_000_000:
+                    logger.warning(
+                        "State snapshot exceeds 1 MB for contract %s (size=%d bytes)",
+                        contract.contract_id,
+                        state_size,
+                    )
+                    errors.append(f"State too large for {contract.contract_id}")
+                    continue
+
+                # Create snapshot
+                snapshot, created = ContractSnapshot.objects.get_or_create(
+                    contract=contract,
+                    ledger_sequence=contract.last_indexed_ledger,
+                    defaults={"state_data": state_data},
+                )
+
+                if created:
+                    snapshot_count += 1
+                    logger.info(
+                        "Created snapshot for contract %s at ledger %d",
+                        contract.contract_id,
+                        contract.last_indexed_ledger,
+                    )
+
+                    # Calculate state diff if there's a previous snapshot
+                    previous_snapshot = (
+                        ContractSnapshot.objects
+                        .filter(
+                            contract=contract,
+                            ledger_sequence__lt=contract.last_indexed_ledger,
+                        )
+                        .order_by("-ledger_sequence")
+                        .first()
+                    )
+
+                    if previous_snapshot:
+                        changes = _calculate_state_diff(
+                            previous_snapshot.state_data,
+                            state_data,
+                        )
+
+                        # Create StateChange records
+                        for change in changes:
+                            StateChange.objects.create(
+                                snapshot=snapshot,
+                                previous_snapshot=previous_snapshot,
+                                field_name=change["field_name"],
+                                old_value=change["old_value"],
+                                new_value=change["new_value"],
+                            )
+                            state_change_count += 1
+
+            except Exception as e:
+                logger.exception(
+                    "Error snapshotting contract %s",
+                    contract.contract_id,
+                )
+                errors.append(f"Error for {contract.contract_id}: {str(e)}")
+
+    except Exception as e:
+        logger.exception("snapshot_contract_state task failed")
+        errors.append(f"Task error: {str(e)}")
+
+    elapsed = time.monotonic() - _start
+    logger.info(
+        "snapshot_contract_state: snapshots=%d changes=%d errors=%d elapsed=%.3fs",
+        snapshot_count,
+        state_change_count,
+        len(errors),
+        elapsed,
+    )
+
+    return {
+        "snapshot_count": snapshot_count,
+        "state_change_count": state_change_count,
+        "errors": errors,
+        "elapsed": elapsed,
+    }

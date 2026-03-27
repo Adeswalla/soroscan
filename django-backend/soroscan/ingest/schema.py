@@ -14,7 +14,15 @@ from strawberry import auto
 from strawberry.types import Info
 
 from .cache_utils import get_or_set_json, query_cache_ttl, stable_cache_key
-from .models import ContractEvent, ContractInvocation, Notification, TrackedContract, WebhookDeliveryLog
+from .models import (
+    ContractEvent,
+    ContractInvocation,
+    ContractSnapshot,
+    Notification,
+    StateChange,
+    TrackedContract,
+    WebhookDeliveryLog,
+)
 from .services.timeline import build_timeline
 from django.utils import timezone
 from django.db.models import Count, Max
@@ -283,6 +291,33 @@ class NotificationType:
     link: str
     is_read: bool
     created_at: datetime
+
+
+@strawberry.type
+class StateChangeType:
+    """Represents a field-level change between contract state snapshots."""
+    id: int
+    field_name: str
+    old_value: Optional[strawberry.scalars.JSON]
+    new_value: strawberry.scalars.JSON
+    created_at: datetime
+
+
+@strawberry.type
+class ContractSnapshotType:
+    """Represents a snapshot of contract state at a specific ledger."""
+    id: int
+    contract_id: str
+    ledger_sequence: int
+    state_data: strawberry.scalars.JSON
+    captured_at: datetime
+    state_changes: list[StateChangeType]
+
+    @strawberry.field
+    def state_size_bytes(self) -> int:
+        """Return the size of state_data in bytes."""
+        import json
+        return len(json.dumps(self.state_data).encode("utf-8"))
 
 
 @strawberry.type
@@ -854,3 +889,126 @@ class Subscription:
 
 
 schema = strawberry.Schema(query=Query, mutation=Mutation, subscription=Subscription)
+
+
+    @strawberry.field
+    def contract_state(
+        self,
+        contract_id: str,
+        ledger: Optional[int] = None,
+    ) -> Optional[ContractSnapshotType]:
+        """
+        Get contract state at a specific ledger or the most recent snapshot.
+
+        Args:
+            contract_id: The contract address
+            ledger: Optional ledger sequence. If not provided, returns the most recent snapshot.
+
+        Returns:
+            ContractSnapshotType with state_data and state_changes, or None if not found
+        """
+        try:
+            contract = TrackedContract.objects.get(contract_id=contract_id)
+        except TrackedContract.DoesNotExist:
+            return None
+
+        if ledger is not None:
+            # Get snapshot at or before the specified ledger
+            snapshot = (
+                ContractSnapshot.objects
+                .filter(contract=contract, ledger_sequence__lte=ledger)
+                .order_by("-ledger_sequence")
+                .first()
+            )
+        else:
+            # Get the most recent snapshot
+            snapshot = (
+                ContractSnapshot.objects
+                .filter(contract=contract)
+                .order_by("-ledger_sequence")
+                .first()
+            )
+
+        if not snapshot:
+            return None
+
+        state_changes = [
+            StateChangeType(
+                id=change.id,
+                field_name=change.field_name,
+                old_value=change.old_value,
+                new_value=change.new_value,
+                created_at=change.created_at,
+            )
+            for change in snapshot.state_changes.all().order_by("-created_at")
+        ]
+
+        return ContractSnapshotType(
+            id=snapshot.id,
+            contract_id=snapshot.contract.contract_id,
+            ledger_sequence=snapshot.ledger_sequence,
+            state_data=snapshot.state_data,
+            captured_at=snapshot.captured_at,
+            state_changes=state_changes,
+        )
+
+    @strawberry.field
+    def contract_snapshots(
+        self,
+        contract_id: str,
+        ledger_min: Optional[int] = None,
+        ledger_max: Optional[int] = None,
+        limit: int = 50,
+    ) -> list[ContractSnapshotType]:
+        """
+        Get contract state snapshots within a ledger range.
+
+        Args:
+            contract_id: The contract address
+            ledger_min: Minimum ledger sequence (inclusive)
+            ledger_max: Maximum ledger sequence (inclusive)
+            limit: Maximum number of snapshots to return (max 1000)
+
+        Returns:
+            List of ContractSnapshotType objects ordered by ledger descending
+        """
+        try:
+            contract = TrackedContract.objects.get(contract_id=contract_id)
+        except TrackedContract.DoesNotExist:
+            return []
+
+        snapshots = ContractSnapshot.objects.filter(contract=contract)
+
+        if ledger_min is not None:
+            snapshots = snapshots.filter(ledger_sequence__gte=ledger_min)
+        if ledger_max is not None:
+            snapshots = snapshots.filter(ledger_sequence__lte=ledger_max)
+
+        limit = max(1, min(limit, 1000))
+        snapshots = snapshots.order_by("-ledger_sequence")[:limit]
+
+        result = []
+        for snapshot in snapshots:
+            state_changes = [
+                StateChangeType(
+                    id=change.id,
+                    field_name=change.field_name,
+                    old_value=change.old_value,
+                    new_value=change.new_value,
+                    created_at=change.created_at,
+                )
+                for change in snapshot.state_changes.all().order_by("-created_at")
+            ]
+
+            result.append(
+                ContractSnapshotType(
+                    id=snapshot.id,
+                    contract_id=snapshot.contract.contract_id,
+                    ledger_sequence=snapshot.ledger_sequence,
+                    state_data=snapshot.state_data,
+                    captured_at=snapshot.captured_at,
+                    state_changes=state_changes,
+                )
+            )
+
+        return result

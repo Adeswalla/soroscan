@@ -5,7 +5,17 @@ from rest_framework import serializers
 
 from django.utils.text import slugify
 
-from .models import APIKey, ContractEvent, ContractInvocation, Team, TeamMembership, TrackedContract, WebhookSubscription
+from .models import (
+    APIKey,
+    ContractEvent,
+    ContractInvocation,
+    ContractSnapshot,
+    StateChange,
+    Team,
+    TeamMembership,
+    TrackedContract,
+    WebhookSubscription,
+)
 
 
 class TeamSerializer(serializers.ModelSerializer):
@@ -283,3 +293,56 @@ class AnalyticsSerializer(serializers.Serializer):
     granularity = serializers.CharField()
     range = serializers.CharField()
     data = serializers.ListField(child=serializers.DictField())
+
+
+
+class StateChangeSerializer(serializers.ModelSerializer):
+    """
+    Serializer for StateChange model.
+    Represents a field-level change between two contract state snapshots.
+    """
+
+    class Meta:
+        model = StateChange
+        fields = [
+            "id",
+            "snapshot",
+            "previous_snapshot",
+            "field_name",
+            "old_value",
+            "new_value",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class ContractSnapshotSerializer(serializers.ModelSerializer):
+    """
+    Serializer for ContractSnapshot model.
+    Includes related state changes and contract metadata.
+    """
+
+    contract_id = serializers.CharField(source="contract.contract_id", read_only=True)
+    contract_name = serializers.CharField(source="contract.name", read_only=True)
+    state_changes = StateChangeSerializer(many=True, read_only=True, required=False)
+    state_size_bytes = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ContractSnapshot
+        fields = [
+            "id",
+            "contract",
+            "contract_id",
+            "contract_name",
+            "ledger_sequence",
+            "state_data",
+            "state_size_bytes",
+            "state_changes",
+            "captured_at",
+        ]
+        read_only_fields = fields
+
+    def get_state_size_bytes(self, obj) -> int:
+        """Return the size of state_data in bytes."""
+        import json
+        return len(json.dumps(obj.state_data).encode("utf-8"))

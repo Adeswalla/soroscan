@@ -33,7 +33,9 @@ from .models import (
     AdminAction,
     ContractEvent,
     ContractInvocation,
+    ContractSnapshot,
     EventAggregation,
+    StateChange,
     Team,
     TeamMembership,
     TrackedContract,
@@ -45,8 +47,10 @@ from .serializers import (
     APIKeySerializer,
     ContractEventSerializer,
     ContractInvocationSerializer,
+    ContractSnapshotSerializer,
     EventSearchSerializer,
     RecordEventRequestSerializer,
+    StateChangeSerializer,
     TeamMemberAddSerializer,
     TeamSerializer,
     TrackedContractSerializer,
@@ -1005,3 +1009,120 @@ def analytics_view(request):
         "range": range_param,
         "data": data,
     })
+
+
+
+# Contract State Snapshots
+# ---------------------------------------------------------------------------
+
+class ContractSnapshotViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for querying contract state snapshots.
+
+    Endpoints:
+    - GET /snapshots/ - List all snapshots with filtering
+    - GET /snapshots/{id}/ - Get snapshot details with state changes
+    - GET /snapshots/?contract={id}&ledger_min={X}&ledger_max={Y} - Filter by contract and ledger range
+    """
+
+    queryset = ContractSnapshot.objects.select_related("contract").prefetch_related("state_changes")
+    serializer_class = ContractSnapshotSerializer
+    filter_backends = [DjangoFilterBackend, OrderingFilter]
+    filterset_fields = ["contract", "ledger_sequence"]
+    ordering_fields = ["ledger_sequence", "captured_at"]
+    ordering = ["-ledger_sequence"]
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        """Filter snapshots by user's contracts."""
+        user = self.request.user
+        if not user.is_authenticated:
+            return ContractSnapshot.objects.none()
+
+        # Get contracts owned by user or their teams
+        user_contracts = TrackedContract.objects.filter(
+            Q(owner=user) | Q(team__members=user)
+        ).distinct()
+
+        return self.queryset.filter(contract__in=user_contracts)
+
+    @action(detail=False, methods=["get"])
+    def by_contract(self, request):
+        """
+        Get snapshots for a specific contract with optional ledger range filtering.
+
+        Query params:
+        - contract_id: Contract address (required)
+        - ledger_min: Minimum ledger sequence (optional)
+        - ledger_max: Maximum ledger sequence (optional)
+        """
+        contract_id = request.query_params.get("contract_id")
+        if not contract_id:
+            return Response(
+                {"detail": "contract_id query parameter is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            contract = TrackedContract.objects.get(contract_id=contract_id)
+        except TrackedContract.DoesNotExist:
+            return Response(
+                {"detail": "Contract not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Check permission
+        if contract.owner != request.user and not TeamMembership.objects.filter(
+            team=contract.team, user=request.user
+        ).exists():
+            return Response(
+                {"detail": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        snapshots = ContractSnapshot.objects.filter(contract=contract)
+
+        # Apply ledger range filtering
+        ledger_min = request.query_params.get("ledger_min")
+        ledger_max = request.query_params.get("ledger_max")
+
+        if ledger_min:
+            try:
+                snapshots = snapshots.filter(ledger_sequence__gte=int(ledger_min))
+            except ValueError:
+                return Response(
+                    {"detail": "ledger_min must be an integer"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        if ledger_max:
+            try:
+                snapshots = snapshots.filter(ledger_sequence__lte=int(ledger_max))
+            except ValueError:
+                return Response(
+                    {"detail": "ledger_max must be an integer"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        snapshots = snapshots.order_by("-ledger_sequence")
+        page = self.paginate_queryset(snapshots)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(snapshots, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["get"])
+    def state_changes(self, request, pk=None):
+        """Get state changes for a specific snapshot."""
+        snapshot = self.get_object()
+        changes = snapshot.state_changes.all().order_by("-created_at")
+
+        page = self.paginate_queryset(changes)
+        if page is not None:
+            serializer = StateChangeSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = StateChangeSerializer(changes, many=True)
+        return Response(serializer.data)

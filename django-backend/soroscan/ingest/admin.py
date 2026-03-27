@@ -21,12 +21,14 @@ from .models import (
     ContractEvent,
     ContractSigningKey,
     ContractQuota,
+    ContractSnapshot,
     DataRetentionPolicy,
     EventAggregation,
     EventSchema,
     IndexerState,
     RemediationIncident,
     RemediationRule,
+    StateChange,
     Team,
     TeamMembership,
     TrackedContract,
@@ -828,8 +830,6 @@ class AdminActionAdmin(admin.ModelAdmin):
 # Analytics admin: EventAggregation + custom dashboard
 # ---------------------------------------------------------------------------
 
-from django.db.models import Sum
-
 
 @admin.register(EventAggregation)
 class EventAggregationAdmin(admin.ModelAdmin):
@@ -977,3 +977,61 @@ class EventAggregationAdmin(admin.ModelAdmin):
 </body>
 </html>"""
         return HttpResponse(html)
+
+
+
+# Contract State Snapshots
+# ---------------------------------------------------------------------------
+
+class StateChangeInline(admin.TabularInline):
+    """Inline display of state changes for a snapshot."""
+    model = StateChange
+    extra = 0
+    readonly_fields = ["field_name", "old_value", "new_value", "created_at"]
+    can_delete = False
+    fields = ["field_name", "old_value", "new_value", "created_at"]
+
+
+@admin.register(ContractSnapshot)
+class ContractSnapshotAdmin(admin.ModelAdmin):
+    """Admin interface for contract state snapshots."""
+    list_display = ["contract", "ledger_sequence", "state_size", "captured_at"]
+    list_filter = ["contract", "captured_at"]
+    search_fields = ["contract__name", "contract__contract_id"]
+    readonly_fields = ["contract", "ledger_sequence", "state_data", "captured_at", "state_size"]
+    inlines = [StateChangeInline]
+    ordering = ["-captured_at"]
+
+    def state_size(self, obj) -> str:
+        """Display the size of the state data."""
+        import json
+        size_bytes = len(json.dumps(obj.state_data).encode("utf-8"))
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        else:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+    state_size.short_description = "State Size"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(StateChange)
+class StateChangeAdmin(admin.ModelAdmin):
+    """Admin interface for state changes."""
+    list_display = ["snapshot", "field_name", "created_at"]
+    list_filter = ["field_name", "created_at"]
+    search_fields = ["snapshot__contract__name", "field_name"]
+    readonly_fields = ["snapshot", "previous_snapshot", "field_name", "old_value", "new_value", "created_at"]
+    ordering = ["-created_at"]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
