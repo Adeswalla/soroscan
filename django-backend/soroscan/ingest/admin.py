@@ -5,6 +5,7 @@ from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin.helpers import ActionForm
 from django.db.models import Count, Sum
+from django.db.models.functions import TruncDay
 from django.http import HttpResponse
 from django.urls import path
 from django.utils.html import format_html
@@ -890,7 +891,6 @@ class EventAggregationAdmin(admin.ModelAdmin):
         )
 
         # Widget 4: daily event volume last 7d
-        from django.db.models.functions import TruncDay
         daily_volume = (
             EventAggregation.objects.filter(timestamp__gte=last_7d)
             .annotate(day=TruncDay("timestamp"))

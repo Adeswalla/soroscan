@@ -7,8 +7,6 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('ingest', '0017_contract_snapshots'),
-        ('ingest', '0018_merge_deprecation_and_eventdedup'),
-        ('ingest', '0018_merge_webhook_timeout_and_eventdedup'),
     ]
 
     operations = [

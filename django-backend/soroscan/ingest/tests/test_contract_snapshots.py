@@ -299,3 +299,152 @@ class TestContractSnapshots:
         change_dict = {c.field_name: c for c in state_changes}
         assert "metadata" in change_dict
         assert "supply" in change_dict
+
+
+    def test_snapshot_task_creates_snapshots(self):
+        """Test that the snapshot task creates snapshots for active contracts."""
+        from ..tasks import snapshot_contract_state
+        
+        user = UserFactory()
+        contract = TrackedContract.objects.create(
+            contract_id="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            name="Test Contract",
+            owner=user,
+            is_active=True,
+            last_indexed_ledger=1000,
+        )
+
+        # Mock the get_contract_state method directly
+        from unittest.mock import patch
+        with patch('soroscan.ingest.tasks.SorobanClient.get_contract_state') as mock_get_state:
+            mock_get_state.return_value = {"balance": "1000"}
+            
+            result = snapshot_contract_state(snapshot_interval=1000)
+            
+            assert result["snapshot_count"] == 1
+            assert result["state_change_count"] == 0
+            assert len(result["errors"]) == 0
+            # Verify snapshot was created for the contract
+            assert ContractSnapshot.objects.filter(contract=contract).exists()
+
+    def test_snapshot_task_skips_inactive_contracts(self):
+        """Test that the snapshot task skips inactive contracts."""
+        from ..tasks import snapshot_contract_state
+        
+        user = UserFactory()
+        contract = TrackedContract.objects.create(
+            contract_id="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            name="Test Contract",
+            owner=user,
+            is_active=False,
+            last_indexed_ledger=1000,
+        )
+
+        result = snapshot_contract_state(snapshot_interval=1000)
+        
+        assert result["snapshot_count"] == 0
+        assert result["state_change_count"] == 0
+        # Verify no snapshot was created for inactive contract
+        assert not ContractSnapshot.objects.filter(contract=contract).exists()
+
+    def test_snapshot_task_respects_interval(self):
+        """Test that the snapshot task only captures at configured intervals."""
+        from ..tasks import snapshot_contract_state
+        
+        user = UserFactory()
+        contract = TrackedContract.objects.create(
+            contract_id="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            name="Test Contract",
+            owner=user,
+            is_active=True,
+            last_indexed_ledger=999,  # Not a multiple of 1000
+        )
+
+        result = snapshot_contract_state(snapshot_interval=1000)
+        
+        assert result["snapshot_count"] == 0
+        # Verify no snapshot was created since ledger is not at interval boundary
+        assert not ContractSnapshot.objects.filter(contract=contract).exists()
+
+    def test_get_contract_state_success(self):
+        """Test successful contract state retrieval."""
+        from ..stellar_client import SorobanClient
+        from unittest.mock import Mock, patch
+        
+        mock_server = Mock()
+        mock_entry = Mock()
+        mock_entry.key = "balance"
+        mock_entry.val = "1000"
+        mock_response = Mock()
+        mock_response.entries = [mock_entry]
+        mock_server.get_contract_data.return_value = mock_response
+        
+        with patch('soroscan.ingest.stellar_client.SorobanServer', return_value=mock_server):
+            client = SorobanClient()
+            state = client.get_contract_state("CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4")
+            
+            assert state is not None
+            assert "balance" in state
+
+    def test_get_contract_state_empty(self):
+        """Test contract state retrieval with no entries."""
+        from ..stellar_client import SorobanClient
+        from unittest.mock import Mock, patch
+        
+        mock_server = Mock()
+        mock_response = Mock()
+        mock_response.entries = []
+        mock_server.get_contract_data.return_value = mock_response
+        
+        with patch('soroscan.ingest.stellar_client.SorobanServer', return_value=mock_server):
+            client = SorobanClient()
+            state = client.get_contract_state("CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4")
+            
+            assert state == {"_empty": True}
+
+    def test_get_contract_state_error(self):
+        """Test contract state retrieval with error."""
+        from ..stellar_client import SorobanClient
+        from unittest.mock import Mock, patch
+        
+        mock_server = Mock()
+        mock_server.get_contract_data.side_effect = Exception("RPC Error")
+        
+        with patch('soroscan.ingest.stellar_client.SorobanServer', return_value=mock_server):
+            client = SorobanClient()
+            state = client.get_contract_state("CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4")
+            
+            assert state is None
+
+    def test_contract_snapshot_viewset_by_contract(self):
+        """Test ContractSnapshotViewSet by_contract action."""
+        from rest_framework.test import APIRequestFactory
+        from ..views import ContractSnapshotViewSet
+        
+        user = UserFactory()
+        contract = TrackedContract.objects.create(
+            contract_id="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            name="Test Contract",
+            owner=user,
+            is_active=True,
+            last_indexed_ledger=1000,
+        )
+        
+        snapshot = ContractSnapshot.objects.create(
+            contract=contract,
+            ledger_sequence=1000,
+            state_data={"balance": "1000"},
+        )
+        
+        factory = APIRequestFactory()
+        request = factory.get(f'/api/snapshots/by_contract/?contract_id={contract.contract_id}')
+        request.user = user
+        
+        view = ContractSnapshotViewSet.as_view({'get': 'by_contract'})
+        response = view(request)
+        
+        assert response.status_code == 200
+        # Verify snapshot was created
+        assert ContractSnapshot.objects.filter(id=snapshot.id).exists()
+
+
