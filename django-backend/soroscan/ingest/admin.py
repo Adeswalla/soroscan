@@ -5,7 +5,6 @@ from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin.helpers import ActionForm
 from django.db.models import Count, Sum
-from django.db.models.functions import TruncDay
 from django.http import HttpResponse
 from django.urls import path
 from django.utils.html import format_html
