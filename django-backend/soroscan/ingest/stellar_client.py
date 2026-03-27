@@ -517,6 +517,6 @@ class SorobanClient:
             )
             return state_dict if state_dict else {"_empty": True}
 
-        except Exception as e:
+        except Exception:
             logger.exception("Failed to get contract state for %s", contract_id)
             return None

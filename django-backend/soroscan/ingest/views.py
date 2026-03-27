@@ -35,7 +35,6 @@ from .models import (
     ContractInvocation,
     ContractSnapshot,
     EventAggregation,
-    StateChange,
     Team,
     TeamMembership,
     TrackedContract,

@@ -19,7 +19,6 @@ from .models import (
     ContractInvocation,
     ContractSnapshot,
     Notification,
-    StateChange,
     TrackedContract,
     WebhookDeliveryLog,
 )

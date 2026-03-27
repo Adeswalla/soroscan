@@ -2,13 +2,11 @@
 Integration tests for contract state snapshots and state-diff tracking.
 """
 import json
-from datetime import datetime, timedelta
 
 import pytest
-from django.utils import timezone
 
 from ..models import ContractSnapshot, StateChange, TrackedContract
-from ..tasks import snapshot_contract_state, _calculate_state_diff
+from ..tasks import _calculate_state_diff
 from .factories import UserFactory
 
 
@@ -56,7 +54,7 @@ class TestContractSnapshots:
 
         state_data = {"balance": "1000"}
 
-        snapshot1 = ContractSnapshot.objects.create(
+        ContractSnapshot.objects.create(
             contract=contract,
             ledger_sequence=1000,
             state_data=state_data,
