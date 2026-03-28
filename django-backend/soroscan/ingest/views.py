@@ -33,7 +33,9 @@ from .models import (
     AdminAction,
     ContractEvent,
     ContractInvocation,
+    ContractSnapshot,
     EventAggregation,
+    StateChange,
     Team,
     TeamMembership,
     TrackedContract,
@@ -45,8 +47,10 @@ from .serializers import (
     APIKeySerializer,
     ContractEventSerializer,
     ContractInvocationSerializer,
+    ContractSnapshotSerializer,
     EventSearchSerializer,
     RecordEventRequestSerializer,
+    StateChangeSerializer,
     TeamMemberAddSerializer,
     TeamSerializer,
     TrackedContractSerializer,
@@ -376,6 +380,92 @@ class ContractInvocationViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
 
+
+class ContractSnapshotViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for querying contract state snapshots.
+
+    Endpoints:
+    - GET /api/contracts/{contract_id}/snapshots/ - List snapshots with filters
+    - GET /api/snapshots/{id}/ - Get snapshot details
+    - GET /api/snapshots/{id}/state-changes/ - Get state changes for snapshot
+    """
+
+    serializer_class = ContractSnapshotSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, OrderingFilter]
+    ordering_fields = ["ledger_sequence", "captured_at"]
+    ordering = ["-ledger_sequence"]
+
+    def get_queryset(self):
+        """Filter by contract and user ownership."""
+        contract_id = self.kwargs.get("contract_id")
+        qs = ContractSnapshot.objects.select_related("contract").filter(
+            contract__owner=self.request.user
+        )
+        if contract_id:
+            qs = qs.filter(contract__contract_id=contract_id)
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        """
+        List contract snapshots with optional ledger range filtering.
+
+        Query params:
+        - ledger_min: Minimum ledger sequence (inclusive)
+        - ledger_max: Maximum ledger sequence (inclusive)
+        - since: ISO timestamp for start of range
+        - until: ISO timestamp for end of range
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+
+        # Ledger range filtering
+        ledger_min = request.query_params.get("ledger_min")
+        ledger_max = request.query_params.get("ledger_max")
+        if ledger_min:
+            try:
+                queryset = queryset.filter(ledger_sequence__gte=int(ledger_min))
+            except (ValueError, TypeError):
+                pass
+        if ledger_max:
+            try:
+                queryset = queryset.filter(ledger_sequence__lte=int(ledger_max))
+            except (ValueError, TypeError):
+                pass
+
+        # Timestamp range filtering
+        since = request.query_params.get("since")
+        until = request.query_params.get("until")
+        if since:
+            queryset = queryset.filter(captured_at__gte=since)
+        if until:
+            queryset = queryset.filter(captured_at__lte=until)
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["get"])
+    def state_changes(self, request, pk=None):
+        """
+        Get state changes for a specific snapshot.
+
+        Returns all StateChange records associated with this snapshot.
+        """
+        snapshot = self.get_object()
+        changes = StateChange.objects.filter(snapshot=snapshot).order_by("-created_at")
+
+        page = self.paginate_queryset(changes)
+        if page is not None:
+            serializer = StateChangeSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = StateChangeSerializer(changes, many=True)
+        return Response(serializer.data)
 
 
 class WebhookSubscriptionViewSet(viewsets.ModelViewSet):

@@ -474,3 +474,56 @@ class SorobanClient:
                 error=str(e),
             )
 
+    def get_contract_state(self, contract_id: str) -> Optional[dict]:
+        """
+        Fetch the current state of a contract from the Soroban network.
+
+        Queries the contract's persistent storage and returns the state as a JSON dict.
+        Returns None on error.
+
+        Args:
+            contract_id: Contract address (C...)
+
+        Returns:
+            Contract state as dict, or None on error
+        """
+        self._rate_limiter.acquire()
+
+        try:
+            # Get contract data entries from the ledger
+            # This uses the getContractData RPC method to fetch persistent storage
+            response = self.server.get_contract_data(contract_id)
+
+            if not response:
+                logger.warning("No contract data found for %s", contract_id)
+                return {}
+
+            # Parse the response into a dict
+            # The response contains ledger entries with contract data
+            state_dict = {}
+
+            # Extract data entries from the response
+            entries = getattr(response, "entries", []) or []
+            for entry in entries:
+                # Each entry has a key and value in XDR format
+                # For now, we'll store the raw entry data
+                # A full implementation would decode the XDR
+                key = getattr(entry, "key", None)
+                val = getattr(entry, "val", None)
+
+                if key and val:
+                    # Store as hex strings for now
+                    state_dict[str(key)] = str(val)
+
+            logger.info(
+                "Fetched contract state for %s: %d entries",
+                contract_id,
+                len(state_dict),
+            )
+
+            return state_dict
+
+        except Exception as e:
+            logger.exception("Failed to fetch contract state for %s", contract_id)
+            return None
+

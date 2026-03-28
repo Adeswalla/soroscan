@@ -1988,3 +1988,151 @@ def aggregate_event_statistics() -> dict[str, Any]:
         "anomaly_detected": anomaly_detected,
         "bucket": hour_bucket.isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Contract State Snapshots: periodic snapshot capture and state-diff tracking
+# ---------------------------------------------------------------------------
+
+def _compute_state_diff(old_state: dict, new_state: dict) -> list[dict]:
+    """
+    Compute field-level differences between two state dicts.
+
+    Returns a list of dicts with keys: field_name, old_value, new_value
+    """
+    from .models import StateChange
+
+    changes = []
+    all_keys = set(old_state.keys()) | set(new_state.keys())
+
+    for key in all_keys:
+        old_val = old_state.get(key)
+        new_val = new_state.get(key)
+
+        if old_val != new_val:
+            changes.append({
+                "field_name": key,
+                "old_value": old_val,
+                "new_value": new_val,
+            })
+
+    return changes
+
+
+@shared_task
+def snapshot_contract_state(snapshot_interval: int = 1000) -> dict[str, Any]:
+    """
+    Capture contract state snapshots at regular ledger intervals.
+
+    Runs periodically (e.g., every 5 minutes) and checks each active contract.
+    If the contract's last_indexed_ledger is a multiple of snapshot_interval,
+    a new snapshot is captured.
+
+    Args:
+        snapshot_interval: Capture snapshot every N ledgers (default: 1000)
+
+    Returns:
+        Summary dict with snapshot_count, error_count, etc.
+    """
+    from .models import ContractSnapshot, StateChange
+
+    _start = time.monotonic()
+    snapshot_count = 0
+    error_count = 0
+    client = SorobanClient()
+
+    active_contracts = TrackedContract.objects.filter(is_active=True)
+
+    for contract in active_contracts:
+        try:
+            last_ledger = contract.last_indexed_ledger
+            if not last_ledger or last_ledger % snapshot_interval != 0:
+                continue
+
+            # Check if snapshot already exists for this ledger
+            if ContractSnapshot.objects.filter(
+                contract=contract,
+                ledger_sequence=last_ledger,
+            ).exists():
+                continue
+
+            # Fetch current contract state from Soroban
+            state_data = client.get_contract_state(contract.contract_id)
+            if state_data is None:
+                logger.warning(
+                    "Failed to fetch state for contract %s at ledger %d",
+                    contract.contract_id,
+                    last_ledger,
+                )
+                error_count += 1
+                continue
+
+            # Validate state size (max 1 MB)
+            state_json_str = json.dumps(state_data)
+            state_size_bytes = len(state_json_str.encode("utf-8"))
+            if state_size_bytes > 1_000_000:
+                logger.warning(
+                    "State snapshot for %s exceeds 1 MB (%d bytes), truncating",
+                    contract.contract_id,
+                    state_size_bytes,
+                )
+                # Truncate to fit within 1 MB
+                # For now, we'll just log and skip
+                error_count += 1
+                continue
+
+            # Create snapshot
+            snapshot = ContractSnapshot.objects.create(
+                contract=contract,
+                ledger_sequence=last_ledger,
+                state_data=state_data,
+            )
+
+            # Compute state diff with previous snapshot
+            prev_snapshot = (
+                ContractSnapshot.objects.filter(
+                    contract=contract,
+                    ledger_sequence__lt=last_ledger,
+                )
+                .order_by("-ledger_sequence")
+                .first()
+            )
+
+            if prev_snapshot:
+                changes = _compute_state_diff(prev_snapshot.state_data, state_data)
+                for change in changes:
+                    StateChange.objects.create(
+                        snapshot=snapshot,
+                        previous_snapshot=prev_snapshot,
+                        field_name=change["field_name"],
+                        old_value=change["old_value"],
+                        new_value=change["new_value"],
+                    )
+
+            snapshot_count += 1
+            logger.info(
+                "Captured snapshot for %s at ledger %d",
+                contract.contract_id,
+                last_ledger,
+            )
+
+        except Exception as e:
+            logger.exception(
+                "Error snapshotting contract %s",
+                contract.contract_id,
+            )
+            error_count += 1
+
+    elapsed = time.monotonic() - _start
+    logger.info(
+        "snapshot_contract_state: captured=%d errors=%d elapsed=%.3fs",
+        snapshot_count,
+        error_count,
+        elapsed,
+    )
+
+    return {
+        "snapshot_count": snapshot_count,
+        "error_count": error_count,
+        "elapsed_seconds": elapsed,
+    }

@@ -5,7 +5,17 @@ from rest_framework import serializers
 
 from django.utils.text import slugify
 
-from .models import APIKey, ContractEvent, ContractInvocation, Team, TeamMembership, TrackedContract, WebhookSubscription
+from .models import (
+    APIKey,
+    ContractEvent,
+    ContractInvocation,
+    ContractSnapshot,
+    StateChange,
+    Team,
+    TeamMembership,
+    TrackedContract,
+    WebhookSubscription,
+)
 
 
 class TeamSerializer(serializers.ModelSerializer):
@@ -283,3 +293,50 @@ class AnalyticsSerializer(serializers.Serializer):
     granularity = serializers.CharField()
     range = serializers.CharField()
     data = serializers.ListField(child=serializers.DictField())
+
+
+class ContractSnapshotSerializer(serializers.ModelSerializer):
+    """
+    Serializer for ContractSnapshot model.
+    Provides read-only contract state snapshots at specific ledgers.
+    """
+
+    contract_id = serializers.CharField(source="contract.contract_id", read_only=True)
+    contract_name = serializers.CharField(source="contract.name", read_only=True)
+
+    class Meta:
+        model = ContractSnapshot
+        fields = [
+            "id",
+            "contract_id",
+            "contract_name",
+            "ledger_sequence",
+            "state_data",
+            "captured_at",
+        ]
+        read_only_fields = fields
+
+
+class StateChangeSerializer(serializers.ModelSerializer):
+    """
+    Serializer for StateChange model.
+    Tracks field-level changes between contract snapshots.
+    """
+
+    snapshot_id = serializers.IntegerField(source="snapshot.id", read_only=True)
+    previous_snapshot_id = serializers.IntegerField(
+        source="previous_snapshot.id", read_only=True, allow_null=True
+    )
+
+    class Meta:
+        model = StateChange
+        fields = [
+            "id",
+            "snapshot_id",
+            "previous_snapshot_id",
+            "field_name",
+            "old_value",
+            "new_value",
+            "created_at",
+        ]
+        read_only_fields = fields

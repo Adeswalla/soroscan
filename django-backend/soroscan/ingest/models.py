@@ -1163,3 +1163,95 @@ class EventDeduplicationLog(models.Model):
 
     def __str__(self):
         return f"Dedup({self.original_event.id}, {self.resolution})"
+
+
+# ---------------------------------------------------------------------------
+# Contract State Snapshots and State-Diff Tracking
+# ---------------------------------------------------------------------------
+
+class ContractSnapshot(models.Model):
+    """
+    Point-in-time snapshot of contract state at a specific ledger.
+    Captured every N ledgers (configurable, default: 1000).
+    """
+
+    contract = models.ForeignKey(
+        TrackedContract,
+        on_delete=models.CASCADE,
+        related_name="snapshots",
+        help_text="Contract this snapshot belongs to",
+    )
+    ledger_sequence = models.PositiveBigIntegerField(
+        db_index=True,
+        help_text="Ledger sequence number when snapshot was captured",
+    )
+    state_data = models.JSONField(
+        help_text="Contract state data (JSON, max 1 MB)",
+    )
+    captured_at = models.DateTimeField(
+        auto_now_add=True,
+        db_index=True,
+        help_text="Timestamp when snapshot was captured",
+    )
+
+    class Meta:
+        ordering = ["-ledger_sequence"]
+        unique_together = ("contract", "ledger_sequence")
+        indexes = [
+            models.Index(fields=["contract", "-ledger_sequence"]),
+            models.Index(fields=["contract", "captured_at"]),
+        ]
+
+    def __str__(self):
+        return f"Snapshot({self.contract.name}, ledger={self.ledger_sequence})"
+
+
+class StateChange(models.Model):
+    """
+    Tracks field-level changes between consecutive contract snapshots.
+    Enables state-diff analysis and historical tracking.
+    """
+
+    snapshot = models.ForeignKey(
+        ContractSnapshot,
+        on_delete=models.CASCADE,
+        related_name="state_changes",
+        help_text="The snapshot where this change was detected",
+    )
+    previous_snapshot = models.ForeignKey(
+        ContractSnapshot,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="next_state_changes",
+        help_text="Previous snapshot for comparison (null if first snapshot)",
+    )
+    field_name = models.CharField(
+        max_length=256,
+        db_index=True,
+        help_text="Dotted path to the field (e.g., 'balances.user1')",
+    )
+    old_value = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Previous value (null if field was created)",
+    )
+    new_value = models.JSONField(
+        help_text="New value after change",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        db_index=True,
+        help_text="When this change was recorded",
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["snapshot", "field_name"]),
+            models.Index(fields=["snapshot", "created_at"]),
+            models.Index(fields=["field_name", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"StateChange({self.snapshot.contract.name}, {self.field_name})"

@@ -286,6 +286,28 @@ class NotificationType:
 
 
 @strawberry.type
+class ContractStateSnapshot:
+    """Contract state at a specific ledger."""
+
+    id: int
+    contract_id: str
+    ledger_sequence: int
+    state_data: strawberry.scalars.JSON
+    captured_at: datetime
+
+
+@strawberry.type
+class ContractStateChange:
+    """Field-level change between contract snapshots."""
+
+    id: int
+    field_name: str
+    old_value: Optional[strawberry.scalars.JSON]
+    new_value: strawberry.scalars.JSON
+    created_at: datetime
+
+
+@strawberry.type
 class Query:
     @strawberry.field
     def contracts(self, is_active: Optional[bool] = None) -> list[ContractType]:
@@ -580,6 +602,93 @@ class Query:
             db_status="CONNECTED",
             redis_status="CONNECTED",
         )
+
+    @strawberry.field
+    def contract_state(
+        self,
+        contract_id: str,
+        ledger: Optional[int] = None,
+    ) -> Optional[ContractStateSnapshot]:
+        """
+        Get contract state at a specific ledger.
+
+        If ledger is not specified, returns the most recent snapshot.
+        Returns None if no snapshot exists for the contract.
+        """
+        from .models import ContractSnapshot
+
+        try:
+            contract = TrackedContract.objects.get(contract_id=contract_id)
+        except TrackedContract.DoesNotExist:
+            return None
+
+        qs = ContractSnapshot.objects.filter(contract=contract)
+
+        if ledger is not None:
+            # Find snapshot at or before the specified ledger
+            snapshot = qs.filter(ledger_sequence__lte=ledger).order_by("-ledger_sequence").first()
+        else:
+            # Get most recent snapshot
+            snapshot = qs.order_by("-ledger_sequence").first()
+
+        if not snapshot:
+            return None
+
+        return ContractStateSnapshot(
+            id=snapshot.id,
+            contract_id=snapshot.contract.contract_id,
+            ledger_sequence=snapshot.ledger_sequence,
+            state_data=snapshot.state_data,
+            captured_at=snapshot.captured_at,
+        )
+
+    @strawberry.field
+    def contract_state_changes(
+        self,
+        contract_id: str,
+        ledger_min: Optional[int] = None,
+        ledger_max: Optional[int] = None,
+        field_name: Optional[str] = None,
+        first: int = 50,
+    ) -> list[ContractStateChange]:
+        """
+        Get state changes for a contract within a ledger range.
+
+        Optionally filter by field name.
+        """
+        from .models import ContractSnapshot, StateChange
+
+        try:
+            contract = TrackedContract.objects.get(contract_id=contract_id)
+        except TrackedContract.DoesNotExist:
+            return []
+
+        # Get snapshots in range
+        snapshots_qs = ContractSnapshot.objects.filter(contract=contract)
+        if ledger_min is not None:
+            snapshots_qs = snapshots_qs.filter(ledger_sequence__gte=ledger_min)
+        if ledger_max is not None:
+            snapshots_qs = snapshots_qs.filter(ledger_sequence__lte=ledger_max)
+
+        snapshot_ids = list(snapshots_qs.values_list("id", flat=True))
+
+        # Get state changes for these snapshots
+        changes_qs = StateChange.objects.filter(snapshot_id__in=snapshot_ids)
+        if field_name:
+            changes_qs = changes_qs.filter(field_name=field_name)
+
+        changes_qs = changes_qs.order_by("-created_at")[:first]
+
+        return [
+            ContractStateChange(
+                id=change.id,
+                field_name=change.field_name,
+                old_value=change.old_value,
+                new_value=change.new_value,
+                created_at=change.created_at,
+            )
+            for change in changes_qs
+        ]
 
     @strawberry.field
     def notifications(
