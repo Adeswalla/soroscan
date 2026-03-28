@@ -119,16 +119,19 @@ class TeamMembershipAdmin(admin.ModelAdmin):
 class TrackedContractAdmin(AdminAuditMixin, admin.ModelAdmin):
     list_display = [
         "name",
+        "alias",
         "contract_id_short",
         "owner",
         "team",
         "is_active",
+        "deprecation_status",
+        "max_events_per_minute",
         "last_indexed_ledger",
         "event_count",
         "created_at",
     ]
-    list_filter = ["is_active", "created_at"]
-    search_fields = ["name", "contract_id"]
+    list_filter = ["is_active", "deprecation_status", "created_at"]
+    search_fields = ["name", "alias", "contract_id"]
     readonly_fields = ["created_at", "updated_at"]
     ordering = ["-created_at"]
     action_form = BackfillActionForm
@@ -428,12 +431,29 @@ class WebhookSubscriptionAdmin(AdminAuditMixin, admin.ModelAdmin):
         "event_type_display",
         "status",
         "is_active_display",
+        "timeout_seconds",
         "failure_count",
         "last_delivery_status",
     ]
     list_filter = ["is_active", "status", "contract", "created_at"]
     search_fields = ["target_url", "contract__name", "event_type"]
     readonly_fields = ["secret", "created_at", "last_triggered", "failure_count", "status"]
+    fieldsets = (
+        (None, {
+            "fields": ("contract", "target_url", "event_type", "is_active"),
+        }),
+        ("Configuration", {
+            "fields": ("timeout_seconds",),
+        }),
+        ("Status", {
+            "fields": ("status", "failure_count", "last_triggered"),
+            "classes": ("collapse",),
+        }),
+        ("Secret", {
+            "fields": ("secret",),
+            "classes": ("collapse",),
+        }),
+    )
     ordering = ["-created_at"]
     inlines = [WebhookSigningKeyInline]
 
