@@ -451,6 +451,51 @@ class WebhookSubscription(models.Model):
         super().save(*args, **kwargs)
 
 
+class WebhookSigningKey(models.Model):
+    """
+    Signing keys for webhook HMAC-SHA256 signatures.
+    Supports key rotation with a 7-day grace period for old keys.
+    """
+
+    subscription = models.ForeignKey(
+        WebhookSubscription,
+        on_delete=models.CASCADE,
+        related_name="signing_keys",
+        help_text="Webhook subscription this key belongs to",
+    )
+    key = models.CharField(
+        max_length=255,
+        unique=True,
+        help_text="HMAC signing key (hex-encoded, at least 32 bytes)",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="Whether this key is currently used for signing",
+    )
+    expires_at = models.DateTimeField(
+        db_index=True,
+        help_text="When this key expires (7 days after rotation)",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        db_index=True,
+        help_text="When this key was created",
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["subscription", "is_active"]),
+            models.Index(fields=["subscription", "created_at"]),
+            models.Index(fields=["expires_at"]),
+        ]
+
+    def __str__(self):
+        status = "active" if self.is_active else "expired"
+        return f"SigningKey({self.subscription.id}, {status})"
+
+
 class WebhookDeliveryLog(models.Model):
     """
     Immutable audit log for every webhook dispatch attempt.

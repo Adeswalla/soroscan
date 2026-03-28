@@ -1,6 +1,7 @@
 """
 Django Admin configuration for SoroScan models.
 """
+import logging
 from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin.helpers import ActionForm
@@ -9,6 +10,8 @@ from django.http import HttpResponse
 from django.urls import path
 from django.utils.html import format_html
 import json
+
+logger = logging.getLogger(__name__)
 
 from .models import (
     AlertExecution,
@@ -32,6 +35,7 @@ from .models import (
     TeamMembership,
     TrackedContract,
     WebhookDeliveryLog,
+    WebhookSigningKey,
     WebhookSubscription,
 )
 from .tasks import backfill_contract_events
@@ -403,6 +407,18 @@ class ContractEventAdmin(AdminAuditMixin, admin.ModelAdmin):
         return HttpResponse(html)
 
 
+class WebhookSigningKeyInline(admin.TabularInline):
+    """Inline admin for managing webhook signing keys."""
+    model = WebhookSigningKey
+    extra = 0
+    readonly_fields = ["key", "created_at", "expires_at"]
+    fields = ["key", "is_active", "created_at", "expires_at"]
+    can_delete = False
+    
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(WebhookSubscription)
 class WebhookSubscriptionAdmin(AdminAuditMixin, admin.ModelAdmin):
     """Admin interface for webhook subscriptions with delivery status display."""
@@ -419,6 +435,7 @@ class WebhookSubscriptionAdmin(AdminAuditMixin, admin.ModelAdmin):
     search_fields = ["target_url", "contract__name", "event_type"]
     readonly_fields = ["secret", "created_at", "last_triggered", "failure_count", "status"]
     ordering = ["-created_at"]
+    inlines = [WebhookSigningKeyInline]
 
     def get_queryset(self, request):
         """Optimize queries with select_related to prevent N+1 issues."""
@@ -461,6 +478,33 @@ class WebhookSubscriptionAdmin(AdminAuditMixin, admin.ModelAdmin):
                 obj.failure_count,
                 obj.last_triggered.strftime("%Y-%m-%d %H:%M:%S"),
             )
+
+    actions = ["rotate_signing_key"]
+
+    @admin.action(description="Rotate signing key for selected webhooks")
+    def rotate_signing_key(self, request, queryset):
+        """Rotate the signing key for selected webhook subscriptions."""
+        from .tasks import _rotate_webhook_signing_key
+        
+        count = 0
+        for webhook in queryset:
+            try:
+                _rotate_webhook_signing_key(webhook)
+                count += 1
+            except Exception as e:
+                self.message_user(
+                    request,
+                    f"Error rotating key for {webhook.target_url}: {str(e)}",
+                    messages.ERROR,
+                )
+                logger.exception(f"Failed to rotate signing key for webhook {webhook.id}")
+        
+        self.message_user(
+            request,
+            f"Successfully rotated signing keys for {count} webhook(s). "
+            f"Old keys will expire in 7 days.",
+            messages.SUCCESS,
+        )
 
 
 @admin.register(IndexerState)

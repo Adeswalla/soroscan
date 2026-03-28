@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import pstats
+import secrets
 import time
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any
@@ -26,7 +27,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from django.db import models
-from .models import ContractABI, ContractEvent, ContractSigningKey, TrackedContract, WebhookSubscription, IndexerState, EventSchema, RemediationRule, RemediationIncident, AdminAction, EventDeduplicationLog
+from .models import ContractABI, ContractEvent, ContractSigningKey, TrackedContract, WebhookSubscription, IndexerState, EventSchema, RemediationRule, RemediationIncident, AdminAction, EventDeduplicationLog, WebhookSigningKey
 from .stellar_client import SorobanClient
 
 logger = logging.getLogger(__name__)
@@ -478,6 +479,94 @@ def validate_event_payload(
         return (False, schema.version)
 
 
+def _get_active_signing_key(subscription: WebhookSubscription) -> WebhookSigningKey | None:
+    """
+    Get the currently active signing key for a webhook subscription.
+    
+    Returns the most recent active key, or None if no active key exists.
+    """
+    return (
+        WebhookSigningKey.objects
+        .filter(subscription=subscription, is_active=True)
+        .order_by("-created_at")
+        .first()
+    )
+
+
+def _sign_webhook_payload(payload: str, key: str) -> str:
+    """
+    Sign a webhook payload using HMAC-SHA256.
+    
+    Args:
+        payload: JSON string of the event data
+        key: Hex-encoded signing key
+        
+    Returns:
+        Hex-encoded HMAC signature
+    """
+    return hmac.new(
+        key.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _rotate_webhook_signing_key(subscription: WebhookSubscription) -> WebhookSigningKey:
+    """
+    Rotate the signing key for a webhook subscription.
+    
+    Creates a new active key and marks the old one as inactive.
+    Old keys are retained for 7 days to allow transition period.
+    
+    Args:
+        subscription: The webhook subscription to rotate keys for
+        
+    Returns:
+        The newly created signing key
+    """
+    # Deactivate old keys
+    WebhookSigningKey.objects.filter(
+        subscription=subscription,
+        is_active=True,
+    ).update(is_active=False)
+    
+    # Create new key (at least 32 bytes = 64 hex chars)
+    new_key = secrets.token_hex(32)
+    expires_at = timezone.now() + timedelta(days=7)
+    
+    signing_key = WebhookSigningKey.objects.create(
+        subscription=subscription,
+        key=new_key,
+        is_active=True,
+        expires_at=expires_at,
+    )
+    
+    logger.info(
+        f"Rotated signing key for webhook subscription {subscription.id}",
+        extra={"webhook_id": subscription.id},
+    )
+    
+    return signing_key
+
+
+def _cleanup_expired_signing_keys() -> int:
+    """
+    Delete expired signing keys (older than 7 days).
+    
+    Returns:
+        Number of keys deleted
+    """
+    cutoff = timezone.now()
+    deleted_count, _ = WebhookSigningKey.objects.filter(
+        expires_at__lt=cutoff
+    ).delete()
+    
+    if deleted_count > 0:
+        logger.info(f"Cleaned up {deleted_count} expired signing keys")
+    
+    return deleted_count
+
+
 @shared_task(
     bind=True,
     autoretry_for=(requests.exceptions.RequestException,),
@@ -526,11 +615,21 @@ def dispatch_webhook(self, subscription_id: int, event_id: int) -> bool:
         "tx_hash": event.tx_hash,
     }
     payload_bytes = json.dumps(event_data, sort_keys=True).encode("utf-8")
-    sig_hex = hmac.new(
-        webhook.secret.encode("utf-8"),
-        msg=payload_bytes,
-        digestmod=hashlib.sha256,
-    ).hexdigest()
+    
+    # Get active signing key
+    signing_key = _get_active_signing_key(webhook)
+    if not signing_key:
+        logger.error(
+            "No active signing key for webhook subscription %s — skipping dispatch",
+            subscription_id,
+            extra={"webhook_id": subscription_id},
+        )
+        return False
+    
+    sig_hex = _sign_webhook_payload(
+        payload_bytes.decode("utf-8"),
+        signing_key.key,
+    )
 
     headers = {
         "Content-Type": "application/json",
@@ -700,6 +799,22 @@ def cleanup_webhook_delivery_logs() -> int:
     )
     _get_metrics().task_duration_seconds.labels(
         task_name="cleanup_webhook_delivery_logs"
+    ).observe(time.monotonic() - _start)
+    return deleted_count
+
+
+@shared_task
+def cleanup_expired_signing_keys() -> int:
+    """
+    Delete expired webhook signing keys (older than 7 days).
+    
+    Signing keys are retained for 7 days after rotation to allow
+    subscribers time to update their verification logic.
+    """
+    _start = time.monotonic()
+    deleted_count = _cleanup_expired_signing_keys()
+    _get_metrics().task_duration_seconds.labels(
+        task_name="cleanup_expired_signing_keys"
     ).observe(time.monotonic() - _start)
     return deleted_count
 
