@@ -448,3 +448,155 @@ class TestContractSnapshots:
         assert ContractSnapshot.objects.filter(id=snapshot.id).exists()
 
 
+
+    def test_contract_snapshot_serializer(self):
+        """Test ContractSnapshotSerializer."""
+        from ..serializers import ContractSnapshotSerializer
+        
+        user = UserFactory()
+        contract = TrackedContract.objects.create(
+            contract_id="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            name="Test Contract",
+            owner=user,
+            is_active=True,
+            last_indexed_ledger=1000,
+        )
+        
+        snapshot = ContractSnapshot.objects.create(
+            contract=contract,
+            ledger_sequence=1000,
+            state_data={"balance": "1000", "owner": "test"},
+        )
+        
+        serializer = ContractSnapshotSerializer(snapshot)
+        data = serializer.data
+        
+        assert data['contract'] == contract.id
+        assert data['ledger_sequence'] == 1000
+        assert data['state_data'] == {"balance": "1000", "owner": "test"}
+
+    def test_state_change_serializer(self):
+        """Test StateChangeSerializer."""
+        from ..serializers import StateChangeSerializer
+        
+        user = UserFactory()
+        contract = TrackedContract.objects.create(
+            contract_id="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            name="Test Contract",
+            owner=user,
+            is_active=True,
+            last_indexed_ledger=1000,
+        )
+        
+        snapshot = ContractSnapshot.objects.create(
+            contract=contract,
+            ledger_sequence=1000,
+            state_data={"balance": "1000"},
+        )
+        
+        state_change = StateChange.objects.create(
+            snapshot=snapshot,
+            previous_snapshot=None,
+            field_name="balance",
+            old_value="500",
+            new_value="1000",
+        )
+        
+        serializer = StateChangeSerializer(state_change)
+        data = serializer.data
+        
+        assert data['field_name'] == "balance"
+        assert data['old_value'] == "500"
+        assert data['new_value'] == "1000"
+
+    def test_snapshot_with_large_state_data(self):
+        """Test snapshot creation with large state data."""
+        user = UserFactory()
+        contract = TrackedContract.objects.create(
+            contract_id="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            name="Test Contract",
+            owner=user,
+            is_active=True,
+            last_indexed_ledger=1000,
+        )
+        
+        # Create large state data
+        large_state = {f"field_{i}": f"value_{i}" * 100 for i in range(100)}
+        
+        snapshot = ContractSnapshot.objects.create(
+            contract=contract,
+            ledger_sequence=1000,
+            state_data=large_state,
+        )
+        
+        assert snapshot.id is not None
+        assert len(snapshot.state_data) == 100
+
+    def test_multiple_state_changes_per_snapshot(self):
+        """Test multiple state changes for a single snapshot."""
+        user = UserFactory()
+        contract = TrackedContract.objects.create(
+            contract_id="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            name="Test Contract",
+            owner=user,
+            is_active=True,
+            last_indexed_ledger=1000,
+        )
+        
+        snapshot = ContractSnapshot.objects.create(
+            contract=contract,
+            ledger_sequence=1000,
+            state_data={"balance": "1000", "owner": "alice", "paused": False},
+        )
+        
+        # Create multiple state changes
+        changes = []
+        for i, field in enumerate(["balance", "owner", "paused"]):
+            change = StateChange.objects.create(
+                snapshot=snapshot,
+                previous_snapshot=None,
+                field_name=field,
+                old_value=f"old_{i}",
+                new_value=f"new_{i}",
+            )
+            changes.append(change)
+        
+        assert snapshot.state_changes.count() == 3
+        assert all(c.snapshot == snapshot for c in changes)
+
+    def test_snapshot_queryset_ordering(self):
+        """Test that snapshots can be ordered by ledger sequence."""
+        user = UserFactory()
+        contract = TrackedContract.objects.create(
+            contract_id="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            name="Test Contract",
+            owner=user,
+            is_active=True,
+            last_indexed_ledger=1000,
+        )
+        
+        # Create snapshots in random order
+        snapshot3 = ContractSnapshot.objects.create(
+            contract=contract,
+            ledger_sequence=3000,
+            state_data={"balance": "3000"},
+        )
+        
+        snapshot1 = ContractSnapshot.objects.create(
+            contract=contract,
+            ledger_sequence=1000,
+            state_data={"balance": "1000"},
+        )
+        
+        snapshot2 = ContractSnapshot.objects.create(
+            contract=contract,
+            ledger_sequence=2000,
+            state_data={"balance": "2000"},
+        )
+        
+        # Query and verify ordering
+        ordered = list(ContractSnapshot.objects.filter(contract=contract).order_by('ledger_sequence'))
+        
+        assert ordered[0].ledger_sequence == 1000
+        assert ordered[1].ledger_sequence == 2000
+        assert ordered[2].ledger_sequence == 3000
