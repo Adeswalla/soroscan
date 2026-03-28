@@ -25,8 +25,8 @@ from django.conf import settings
 from django.db.models import F
 from django.utils import timezone
 
-from django.db import models
-from .models import ContractABI, ContractEvent, ContractSigningKey, TrackedContract, WebhookSubscription, IndexerState, EventSchema, RemediationRule, RemediationIncident, AdminAction, EventDeduplicationLog
+from .models import ContractABI, ContractEvent, ContractSigningKey, TrackedContract, WebhookSubscription, IndexerState, EventSchema, RemediationRule, RemediationIncident, AdminAction
+from .rate_limit import check_ingest_rate
 from .stellar_client import SorobanClient
 
 logger = logging.getLogger(__name__)
@@ -337,6 +337,21 @@ def _upsert_contract_event(
     client: SorobanClient | None = None,
     batch_cache: dict | None = None,
 ) -> tuple[ContractEvent, bool]:
+    # Check rate limit before processing
+    if not check_ingest_rate(contract):
+        m = _get_metrics()
+        m.events_rate_limited_total.labels(
+            contract_id=_short_contract_id(contract.contract_id),
+            network=_network_label(),
+        ).inc()
+        logger.warning(
+            "Rate limit exceeded for contract %s — skipping event",
+            contract.contract_id,
+            extra={"contract_id": contract.contract_id},
+        )
+        # Return a dummy tuple to indicate the event was skipped
+        return (None, False)
+    
     ledger = _safe_int(_event_attr(event, "ledger", "ledger_sequence"), default=0)
     event_index = _extract_event_index(event, fallback_event_index)
     tx_hash = str(_event_attr(event, "tx_hash", "transaction_hash", default="") or "")
@@ -546,7 +561,7 @@ def dispatch_webhook(self, subscription_id: int, event_id: int) -> bool:
             webhook.target_url,
             data=payload_bytes,
             headers=headers,
-            timeout=10,
+            timeout=webhook.timeout_seconds,
         )
         status_code = response.status_code
 
@@ -593,6 +608,23 @@ def dispatch_webhook(self, subscription_id: int, event_id: int) -> bool:
 
         _on_delivery_failure(webhook, self)
         response.raise_for_status()
+
+    except requests.exceptions.Timeout:
+        # Log timeout as 504 Gateway Timeout
+        if not attempt_logged:
+            _log_delivery_attempt(webhook, event, attempt_number, 504, False, "Timeout exceeded")
+            attempt_logged = True
+            _on_delivery_failure(webhook, self)
+
+        logger.warning(
+            "Webhook %s dispatch timed out (attempt %s/%s) after %d seconds",
+            subscription_id,
+            attempt_number,
+            self.max_retries + 1,
+            webhook.timeout_seconds,
+            extra={"webhook_id": subscription_id},
+        )
+        raise
 
     except requests.RequestException as exc:
         if not attempt_logged:
@@ -700,6 +732,45 @@ def cleanup_webhook_delivery_logs() -> int:
     )
     _get_metrics().task_duration_seconds.labels(
         task_name="cleanup_webhook_delivery_logs"
+    ).observe(time.monotonic() - _start)
+    return deleted_count
+
+
+@shared_task
+def cleanup_old_dedup_logs(dry_run: bool = False) -> int:
+    """
+    Prune ``EventDeduplicationLog`` entries older than the configured retention period (TTL cleanup).
+    
+    Args:
+        dry_run: If True, calculate count but don't delete records.
+    
+    Returns:
+        Number of records that were (or would be) deleted.
+    """
+    from django.conf import settings
+    from .models import EventDeduplicationLog
+
+    _start = time.monotonic()
+    retention_days = getattr(settings, "DEDUP_LOG_RETENTION_DAYS", 90)
+    cutoff = timezone.now() - timedelta(days=retention_days)
+    
+    # Get the count of records that would be deleted
+    records_to_delete = EventDeduplicationLog.objects.filter(created_at__lt=cutoff)
+    deleted_count = records_to_delete.count()
+    
+    if not dry_run:
+        # Actually delete the records
+        deleted_count, _ = records_to_delete.delete()
+    
+    logger.info(
+        "Pruned %d EventDeduplicationLog entries older than %d days (dry_run=%s)",
+        deleted_count,
+        retention_days,
+        dry_run,
+        extra={"deletion_count": deleted_count, "retention_days": retention_days, "dry_run": dry_run},
+    )
+    _get_metrics().task_duration_seconds.labels(
+        task_name="cleanup_old_dedup_logs"
     ).observe(time.monotonic() - _start)
     return deleted_count
 
@@ -843,6 +914,19 @@ def sync_events_from_horizon() -> int:
             except TrackedContract.DoesNotExist:
                 continue
 
+            # Check rate limit before processing
+            if not check_ingest_rate(contract):
+                m.events_rate_limited_total.labels(
+                    contract_id=_short_contract_id(contract.contract_id),
+                    network=network,
+                ).inc()
+                logger.warning(
+                    "Rate limit exceeded for contract %s — skipping event",
+                    contract.contract_id,
+                    extra={"contract_id": contract.contract_id},
+                )
+                continue
+
             payload = event.value
             passed, version_used = validate_event_payload(
                 contract, event.type, payload, ledger=event.ledger
@@ -978,9 +1062,13 @@ def backfill_contract_events(
                 )
 
             for fallback_event_index, event in enumerate(batch_events):
-                _, created = _upsert_contract_event(
+                result = _upsert_contract_event(
                     contract, event, fallback_event_index, client=client, batch_cache=batch_cache
                 )
+                # Handle rate-limited events (returns None, False)
+                if result[0] is None:
+                    continue
+                _, created = result
                 processed_events += 1
                 if created:
                     created_events += 1
