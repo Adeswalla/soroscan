@@ -23,6 +23,7 @@ from .models import (
     ContractQuota,
     DataRetentionPolicy,
     EventAggregation,
+    EventDeduplicationLog,
     EventSchema,
     IndexerState,
     RemediationIncident,
@@ -829,6 +830,50 @@ class AdminActionAdmin(admin.ModelAdmin):
 # ---------------------------------------------------------------------------
 
 from django.db.models import Sum
+
+
+@admin.register(EventDeduplicationLog)
+class EventDeduplicationLogAdmin(admin.ModelAdmin):
+    """Read-only audit trail for event deduplication decisions."""
+
+    list_display = [
+        "original_event",
+        "resolution",
+        "created_at",
+        "payload_preview",
+    ]
+    list_filter = ["resolution", "created_at"]
+    search_fields = [
+        "original_event__contract__name",
+        "original_event__contract__contract_id",
+        "original_event__id",
+    ]
+    readonly_fields = [
+        "original_event",
+        "duplicate_payload",
+        "resolution",
+        "created_at",
+    ]
+    ordering = ["-created_at"]
+    date_hierarchy = "created_at"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def payload_preview(self, obj):
+        """Display a truncated preview of the duplicate payload."""
+        payload_str = json.dumps(obj.duplicate_payload, indent=2)
+        if len(payload_str) > 100:
+            payload_str = payload_str[:100] + "..."
+        return format_html("<pre>{}</pre>", payload_str)
+
+    payload_preview.short_description = "Duplicate Payload"
 
 
 @admin.register(EventAggregation)

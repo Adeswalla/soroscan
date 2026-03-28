@@ -8,6 +8,7 @@ import hmac
 import io
 import json
 import logging
+import os
 import pstats
 import time
 from datetime import datetime, timedelta, timezone as dt_timezone
@@ -25,7 +26,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from django.db import models
-from .models import ContractABI, ContractEvent, ContractSigningKey, TrackedContract, WebhookSubscription, IndexerState, EventSchema, RemediationRule, RemediationIncident, AdminAction
+from .models import ContractABI, ContractEvent, ContractSigningKey, TrackedContract, WebhookSubscription, IndexerState, EventSchema, RemediationRule, RemediationIncident, AdminAction, EventDeduplicationLog
 from .stellar_client import SorobanClient
 
 logger = logging.getLogger(__name__)
@@ -253,6 +254,82 @@ def resolve_signature_status(
         return "invalid"
 
 
+def _get_dedup_strategy() -> str:
+    """Get the configured deduplication strategy from environment."""
+    strategy = os.getenv("DEDUP_STRATEGY", "last-write-wins").lower()
+    if strategy not in ("last-write-wins", "first-write-wins", "merge"):
+        logger.warning(
+            f"Invalid DEDUP_STRATEGY '{strategy}', defaulting to 'last-write-wins'"
+        )
+        return "last-write-wins"
+    return strategy
+
+
+def _handle_duplicate_event(
+    existing: ContractEvent,
+    new_payload: dict,
+    strategy: str,
+) -> None:
+    """
+    Handle a duplicate event based on the configured strategy.
+    
+    Args:
+        existing: The existing ContractEvent in the database
+        new_payload: The payload from the duplicate event
+        strategy: The deduplication strategy to apply
+    """
+    if existing.payload == new_payload:
+        # Exact duplicate - skip
+        EventDeduplicationLog.objects.create(
+            original_event=existing,
+            duplicate_payload=new_payload,
+            resolution=EventDeduplicationLog.Resolution.SKIPPED,
+        )
+        logger.debug(
+            f"Skipped exact duplicate event: {existing.contract.contract_id} "
+            f"ledger={existing.ledger} event_index={existing.event_index}"
+        )
+    else:
+        # Conflicting payload - apply strategy
+        if strategy == "last-write-wins":
+            existing.payload = new_payload
+            existing.save(update_fields=["payload"])
+            EventDeduplicationLog.objects.create(
+                original_event=existing,
+                duplicate_payload=new_payload,
+                resolution=EventDeduplicationLog.Resolution.REPLACED,
+            )
+            logger.info(
+                f"Replaced event payload (last-write-wins): {existing.contract.contract_id} "
+                f"ledger={existing.ledger} event_index={existing.event_index}"
+            )
+        elif strategy == "first-write-wins":
+            # Keep existing, just log
+            EventDeduplicationLog.objects.create(
+                original_event=existing,
+                duplicate_payload=new_payload,
+                resolution=EventDeduplicationLog.Resolution.SKIPPED,
+            )
+            logger.info(
+                f"Kept original event (first-write-wins): {existing.contract.contract_id} "
+                f"ledger={existing.ledger} event_index={existing.event_index}"
+            )
+        elif strategy == "merge":
+            # Merge payloads (simple dict merge - new values override old)
+            merged_payload = {**existing.payload, **new_payload}
+            existing.payload = merged_payload
+            existing.save(update_fields=["payload"])
+            EventDeduplicationLog.objects.create(
+                original_event=existing,
+                duplicate_payload=new_payload,
+                resolution=EventDeduplicationLog.Resolution.MERGED,
+            )
+            logger.info(
+                f"Merged event payloads: {existing.contract.contract_id} "
+                f"ledger={existing.ledger} event_index={existing.event_index}"
+            )
+
+
 def _upsert_contract_event(
     contract: TrackedContract,
     event: Any,
@@ -274,21 +351,30 @@ def _upsert_contract_event(
     if not isinstance(timestamp, datetime):
         timestamp = timezone.now()
 
-    result = ContractEvent.objects.update_or_create(
-        contract=contract,
-        ledger=ledger,
-        event_index=event_index,
-        defaults={
-            "tx_hash": tx_hash,
-            "event_type": event_type,
-            "payload": payload,
-            "timestamp": timestamp,
-            "raw_xdr": raw_xdr,
-            "signature_status": signature_status,
-        },
-    )
-    obj, created = result
-    if created:
+    # Check for existing event (deduplication)
+    try:
+        existing = ContractEvent.objects.get(
+            contract=contract,
+            ledger=ledger,
+            event_index=event_index,
+        )
+        # Duplicate detected - handle based on strategy
+        strategy = _get_dedup_strategy()
+        _handle_duplicate_event(existing, payload, strategy)
+        return (existing, False)
+    except ContractEvent.DoesNotExist:
+        # New event - create it
+        obj = ContractEvent.objects.create(
+            contract=contract,
+            ledger=ledger,
+            event_index=event_index,
+            tx_hash=tx_hash,
+            event_type=event_type,
+            payload=payload,
+            timestamp=timestamp,
+            raw_xdr=raw_xdr,
+            signature_status=signature_status,
+        )
         m = _get_metrics()
         m.events_ingested_total.labels(
             contract_id=_short_contract_id(contract.contract_id),
@@ -303,7 +389,7 @@ def _upsert_contract_event(
         # --- ABI-based XDR decoding (issue #58) ---
         _try_decode_event(obj, contract, event_type, raw_xdr)
 
-    return result
+        return (obj, True)
 
 
 def _try_decode_event(

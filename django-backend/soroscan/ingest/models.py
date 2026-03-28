@@ -1075,3 +1075,46 @@ class EventAggregation(models.Model):
 
     def __str__(self):
         return f"Agg({self.contract.name}, {self.event_type}, {self.timestamp}, {self.event_count})"
+
+
+class EventDeduplicationLog(models.Model):
+    """
+    Audit trail for event deduplication decisions.
+    Records all duplicate events and how they were resolved.
+    """
+
+    class Resolution(models.TextChoices):
+        SKIPPED = "skipped", "Skipped (identical payload)"
+        REPLACED = "replaced", "Replaced (conflicting payload)"
+        MERGED = "merged", "Merged (custom merge strategy)"
+
+    original_event = models.ForeignKey(
+        ContractEvent,
+        on_delete=models.CASCADE,
+        related_name="dedup_logs",
+        help_text="The original event that was kept",
+    )
+    duplicate_payload = models.JSONField(
+        help_text="The payload of the duplicate event"
+    )
+    resolution = models.CharField(
+        max_length=16,
+        choices=Resolution.choices,
+        help_text="How the duplicate was resolved",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        db_index=True,
+        help_text="When the deduplication decision was made",
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["original_event", "created_at"]),
+            models.Index(fields=["resolution", "created_at"]),
+            models.Index(fields=["created_at"]),
+        ]
+
+    def __str__(self):
+        return f"Dedup({self.original_event.id}, {self.resolution})"
