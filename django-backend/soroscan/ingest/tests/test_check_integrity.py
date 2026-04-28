@@ -5,7 +5,6 @@ import pytest
 from django.core.management import call_command
 from django.test import TestCase
 
-from soroscan.ingest.models import ContractEvent
 from soroscan.ingest.tests.factories import ContractEventFactory, TrackedContractFactory
 
 
