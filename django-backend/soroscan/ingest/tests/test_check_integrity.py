@@ -49,7 +49,7 @@ class TestCheckIntegrityCommand(TestCase):
         self.assertIn("✗ Found 1 gap(s)", output)
         self.assertIn("Gap: Ledger 1,002 - 1,004", output)
         self.assertIn("Total Missing Ledgers: 3", output)
-        self.assertIn("Coverage: 80.00%", output)
+        self.assertIn("Coverage: 57.14%", output)
 
     def test_multiple_gaps_detection(self):
         """Test detection of multiple gaps in ledger sequence."""
@@ -63,7 +63,7 @@ class TestCheckIntegrityCommand(TestCase):
         self.assertIn("✗ Found 2 gap(s)", output)
         self.assertIn("Gap: Ledger 1,002 - 1,004", output)
         self.assertIn("Gap: Ledger 1,006 - 1,009", output)
-        self.assertIn("Total Missing Ledgers: 8", output)
+        self.assertIn("Total Missing Ledgers: 7", output)
 
     def test_gap_at_boundaries(self):
         """Test gaps at the beginning and end of range."""
