@@ -12,6 +12,25 @@ from django.core.exceptions import ImproperlyConfigured
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def _load_software_version() -> str:
+    """
+    Resolve the platform version from VERSION.md, with a safe fallback.
+    """
+    version_file_candidates = [
+        BASE_DIR / "VERSION.md",
+        BASE_DIR.parent / "VERSION.md",
+    ]
+    for candidate in version_file_candidates:
+        try:
+            if candidate.exists():
+                content = candidate.read_text(encoding="utf-8").strip()
+                if content:
+                    return content
+        except OSError:
+            continue
+    return "1.0.0"
+
 # Environment variables
 env = environ.Env(
     DEBUG=(bool, False),
@@ -42,6 +61,7 @@ DEBUG = env("DEBUG")
 
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
 FRONTEND_BASE_URL = env("FRONTEND_BASE_URL", default="http://localhost:3000")
+SOFTWARE_VERSION = env("SOFTWARE_VERSION", default=_load_software_version())
 
 # Application definition
 INSTALLED_APPS = [
@@ -76,6 +96,7 @@ MIDDLEWARE = [
     "soroscan.middleware.ReverseProxyFixedIPMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "soroscan.middleware.RequestIdMiddleware",
+    "soroscan.middleware.PlatformVersionMiddleware",
     "soroscan.middleware.SlowQueryMiddleware",
     "soroscan.middleware.ApiDeprecationMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -389,6 +410,23 @@ LOGGING["handlers"]["slow_queries"] = {
 LOGGING["loggers"]["soroscan.slow_queries"] = {
     "handlers": ["slow_queries", "console"],
     "level": "WARNING",
+    "propagate": False,
+}
+
+# ---------------------------------------------------------------------------
+# Security audit logger — admin login success / failure events
+# ---------------------------------------------------------------------------
+LOGGING["handlers"]["security_audit"] = {
+    "level": "INFO",
+    "class": "logging.handlers.TimedRotatingFileHandler",
+    "filename": str(BASE_DIR / "logs" / "security_audit.log"),
+    "when": "midnight",
+    "backupCount": 30,
+    "formatter": "default",
+}
+LOGGING["loggers"]["soroscan.security_audit"] = {
+    "handlers": ["security_audit", "console"],
+    "level": "INFO",
     "propagate": False,
 }
 

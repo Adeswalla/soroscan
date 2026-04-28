@@ -14,6 +14,7 @@ DEBUG = True
 
 ALLOWED_HOSTS = ["*"]
 FRONTEND_BASE_URL = "http://localhost:3000"
+SOFTWARE_VERSION = "1.0.0-test"
 
 # Application definition
 INSTALLED_APPS = [
@@ -40,6 +41,7 @@ MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "soroscan.middleware.RequestIdMiddleware",
+    "soroscan.middleware.PlatformVersionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
