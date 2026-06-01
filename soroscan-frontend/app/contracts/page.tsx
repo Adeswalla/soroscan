@@ -14,10 +14,10 @@ import {
   deleteContract,
 } from "@/components/ingest/contract-graphql";
 import type { Contract, ContractFormData } from "@/components/ingest/contract-types";
-import { filterContractsByQuery } from "@/lib/contract-search";
+import { useOnboarding } from "@/context/OnboardingContext";
 
 export default function ContractsPage() {
-  const router = useRouter();
+  const { startOnboarding, isActive } = useOnboarding();
   const [contracts, setContracts] = React.useState<Contract[]>([]);
   const [searchQuery, setSearchQuery] = React.useState("");
   const [isLoading, setIsLoading] = React.useState(true);

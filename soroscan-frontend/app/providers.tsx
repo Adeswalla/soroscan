@@ -3,6 +3,8 @@
 import type { ReactNode } from "react";
 import { ThemeProvider } from "@/context/ThemeContext";
 import { ToastProvider } from "@/context/ToastContext";
+import { OnboardingProvider } from "@/context/OnboardingContext";
+import { OnboardingTour } from "@/components/OnboardingTour";
 import { ApolloProvider } from "@/providers/ApolloProvider";
 
 interface ProvidersProps {
@@ -12,9 +14,12 @@ interface ProvidersProps {
 export function Providers({ children }: ProvidersProps) {
   return (
     <ApolloProvider>
-      <ThemeProvider>
-        <ToastProvider>{children}</ToastProvider>
-      </ThemeProvider>
+      <OnboardingProvider>
+        <ToastProvider>
+          {children}
+          <OnboardingTour />
+        </ToastProvider>
+      </OnboardingProvider>
     </ApolloProvider>
   );
 }
