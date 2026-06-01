@@ -4,10 +4,11 @@ import { cn } from "@/lib/utils"
 export interface InputProps
   extends React.InputHTMLAttributes<HTMLInputElement> {
     label?: string;
+    hideIndicator?: boolean;
   }
 
 const Input = React.forwardRef<HTMLInputElement, InputProps>(
-  ({ className, type, label, ...props }, ref) => {
+  ({ className, type, label, hideIndicator, ...props }, ref) => {
     return (
       <div className="w-full space-y-1 group">
         {label && (
@@ -28,8 +29,9 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
             ref={ref}
             {...props}
           />
-          {/* Active status indicator */}
-          <div className="absolute right-3 w-2 h-2 rounded-full border border-terminal-green/30 group-focus-within:bg-terminal-green group-focus-within:shadow-glow-green transition-all" />
+          {!hideIndicator ? (
+            <div className="absolute right-3 w-2 h-2 rounded-full border border-terminal-green/30 group-focus-within:bg-terminal-green group-focus-within:shadow-glow-green transition-all" />
+          ) : null}
         </div>
       </div>
     )

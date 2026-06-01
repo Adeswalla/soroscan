@@ -5,6 +5,7 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { Button } from "../Button"
 import { Menu, X, LogOut } from "lucide-react"
+import { ThemeToggle } from "@/components/ThemeToggle"
 import { isLoggedIn, clearTokens } from "@/lib/auth"
 import { useRouter } from "next/navigation"
 
@@ -70,6 +71,7 @@ export function Navbar() {
         </div>
 
           <div className="hidden md:flex items-center gap-3">
+            <ThemeToggle />
             {authenticated ? (
               <Button 
                 size="sm" 
@@ -142,6 +144,9 @@ export function Navbar() {
               </Link>
             )
           )}
+          <div className="flex items-center gap-3 py-1">
+            <ThemeToggle />
+          </div>
           {authenticated ? (
             <button
               onClick={handleLogout}

@@ -1,9 +1,11 @@
 "use client";
 
 import * as React from "react";
+import { useRouter } from "next/navigation";
 import { Card } from "@/components/terminal/Card";
 import { Button } from "@/components/terminal/Button";
 import { ContractTable } from "./components/ContractTable";
+import { ContractSearch } from "./components/ContractSearch";
 import { RegisterModal } from "./components/RegisterModal";
 import { DeleteConfirmModal } from "./components/DeleteConfirmModal";
 import {
@@ -12,9 +14,12 @@ import {
   deleteContract,
 } from "@/components/ingest/contract-graphql";
 import type { Contract, ContractFormData } from "@/components/ingest/contract-types";
+import { filterContractsByQuery } from "@/lib/contract-search";
 
 export default function ContractsPage() {
+  const router = useRouter();
   const [contracts, setContracts] = React.useState<Contract[]>([]);
+  const [searchQuery, setSearchQuery] = React.useState("");
   const [isLoading, setIsLoading] = React.useState(true);
   const [isRegisterModalOpen, setIsRegisterModalOpen] = React.useState(false);
   const [deleteTarget, setDeleteTarget] = React.useState<Contract | null>(null);
@@ -49,6 +54,11 @@ export default function ContractsPage() {
       setDeleteTarget(contract);
     }
   };
+
+  const filteredContracts = React.useMemo(
+    () => filterContractsByQuery(searchQuery, contracts),
+    [searchQuery, contracts]
+  );
 
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return;
@@ -91,16 +101,29 @@ export default function ContractsPage() {
         )}
 
         <Card title="TRACKED_CONTRACTS">
+          <div className="mb-6">
+            <ContractSearch
+              contracts={contracts}
+              value={searchQuery}
+              onChange={setSearchQuery}
+              onSelect={(contract) => router.push(`/contracts/${contract.id}`)}
+              placeholder="Search contracts..."
+            />
+          </div>
           {isLoading ? (
             <div className="text-center py-12 text-terminal-gray font-terminal-mono">
               LOADING...
             </div>
+          ) : searchQuery.trim() && filteredContracts.length === 0 ? (
+            <div className="text-center py-12 text-terminal-gray font-terminal-mono">
+              No contracts match &quot;{searchQuery}&quot;
+            </div>
           ) : (
             <ContractTable
-                contracts={contracts}
-                onDelete={handleDeleteClick}
-                onRegister={() => setIsRegisterModalOpen(true)}
-              />
+              contracts={filteredContracts}
+              onDelete={handleDeleteClick}
+              onRegister={() => setIsRegisterModalOpen(true)}
+            />
           )}
         </Card>
 

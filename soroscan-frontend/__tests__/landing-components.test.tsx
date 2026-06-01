@@ -127,26 +127,36 @@ describe("Features", () => {
 // ── Navbar ─────────────────────────────────────────────────────────
 describe("Navbar", () => {
   let Navbar: React.ComponentType
+  let ThemeProvider: React.ComponentType<{ children: React.ReactNode }>
 
   beforeAll(async () => {
     const mod = await import("@/components/terminal/landing/Navbar")
     Navbar = mod.Navbar
+    const themeMod = await import("@/context/ThemeContext")
+    ThemeProvider = themeMod.ThemeProvider
   })
 
+  const renderNavbar = () =>
+    render(
+      <ThemeProvider>
+        <Navbar />
+      </ThemeProvider>
+    )
+
   it("renders the logo text", () => {
-    render(<Navbar />)
+    renderNavbar()
     expect(screen.getByText("[SOROSCAN]")).toBeInTheDocument()
   })
 
   it("renders desktop nav links", () => {
-    render(<Navbar />)
+    renderNavbar()
     expect(screen.getAllByText("DOCS").length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText("FEATURES").length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText("GITHUB").length).toBeGreaterThanOrEqual(1)
   })
 
   it("toggles mobile menu on hamburger click", () => {
-    render(<Navbar />)
+    renderNavbar()
     const toggle = screen.getByRole("button", { name: /toggle menu/i })
     // Before click — only desktop links (could be 1 or more)
     const before = screen.getAllByText("DOCS").length
